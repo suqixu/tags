@@ -448,6 +448,64 @@ const HomeView = {
     // ----- 标签云 -----
     const tagCloudData = ref([]);
     const tagCloudLoading = ref(false);
+    // 缩放/平移状态
+    const tagCloudView = reactive({ scale: 1, tx: 0, ty: 0 });
+    const tagCloudCanvasStyle = computed(() => ({
+      transform: `translate(${tagCloudView.tx}px, ${tagCloudView.ty}px) scale(${tagCloudView.scale})`,
+      transformOrigin: '0 0',
+      width: '500px',
+      height: '300px',
+      position: 'absolute',
+      left: 0,
+      top: 0,
+    }));
+    const onTagCloudWheel = (e) => {
+      e.preventDefault();
+      const container = e.currentTarget;
+      const rect = container.getBoundingClientRect();
+      // 鼠标在容器中的坐标
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      // 缩放因子
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const newScale = Math.max(0.4, Math.min(5, tagCloudView.scale * factor));
+      const realFactor = newScale / tagCloudView.scale;
+      // 以鼠标位置为缩放中心：使鼠标下的画布点保持不动
+      tagCloudView.tx = mx - (mx - tagCloudView.tx) * realFactor;
+      tagCloudView.ty = my - (my - tagCloudView.ty) * realFactor;
+      tagCloudView.scale = newScale;
+    };
+    let _dragState = null;
+    const onTagCloudMouseDown = (e) => {
+      // 仅响应鼠标左键，且不是点击在标签上
+      if (e.button !== 0) return;
+      _dragState = {
+        startX: e.clientX,
+        startY: e.clientY,
+        origTx: tagCloudView.tx,
+        origTy: tagCloudView.ty,
+        moved: false,
+      };
+    };
+    const onTagCloudMouseMove = (e) => {
+      if (!_dragState) return;
+      const dx = e.clientX - _dragState.startX;
+      const dy = e.clientY - _dragState.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) _dragState.moved = true;
+      tagCloudView.tx = _dragState.origTx + dx;
+      tagCloudView.ty = _dragState.origTy + dy;
+    };
+    const onTagCloudMouseUp = () => { _dragState = null; };
+    const onTagCloudItemClick = (t, e) => {
+      // 拖拽过程中触发的 click 不视为筛选
+      if (_dragState && _dragState.moved) return;
+      filterByTag(t);
+    };
+    const resetTagCloudView = () => {
+      tagCloudView.scale = 1;
+      tagCloudView.tx = 0;
+      tagCloudView.ty = 0;
+    };
     const loadTagCloud = async () => {
       tagCloudLoading.value = true;
       try {
@@ -551,8 +609,13 @@ const HomeView = {
 
         placed.push({ x: bestX, y: bestY, w: estW, h: estH });
 
-        const colors = ['#909399', '#67c23a', '#e6a23c', '#409eff', '#f56c6c', '#6f42c1'];
-        const colorIdx = Math.min(Math.floor(((tag.count - min) / (max - min || 1)) * (colors.length - 1)), colors.length - 1);
+        // 颜色策略：基于标签 id（或索引）使用黄金角分布生成色相，保证颜色丰富且区分度高
+        // 权重越大（count 越多）的标签：饱和度更高、亮度更低（更深更浓）
+        const hue = ((tag.id || (i + 1)) * 137.508) % 360; // 黄金角 137.508°
+        const ratio = max === min ? 0.5 : (tag.count - min) / (max - min);
+        const saturation = Math.round(55 + ratio * 30); // 55% ~ 85%
+        const lightness = Math.round(55 - ratio * 22);  // 55% ~ 33%
+        const color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
 
         positions.push({
           ...tag,
@@ -561,14 +624,14 @@ const HomeView = {
             left: bestX + 'px',
             top: bestY + 'px',
             fontSize: size + 'px',
-            color: colors[colorIdx],
+            color: color,
             cursor: 'pointer',
             padding: '3px 6px',
             lineHeight: '1.4',
             whiteSpace: 'nowrap',
-            fontWeight: '500',
+            fontWeight: ratio > 0.6 ? '700' : (ratio > 0.3 ? '600' : '500'),
             borderRadius: '4px',
-            transition: 'all 0.25s ease',
+            transition: 'background 0.2s ease, text-shadow 0.2s ease',
             userSelect: 'none',
           },
         });
@@ -855,10 +918,19 @@ const HomeView = {
       emit("logout");
     };
 
-    // 树过滤
+    // 树过滤 — 模糊子序列匹配（忽略大小写，支持分散字符）
     const filterNode = (value, data) => {
       if (!value) return true;
-      return data.name.includes(value);
+      const query = value.toLowerCase();
+      const target = data.name.toLowerCase();
+      // 先尝试 includes 快速路径
+      if (target.includes(query)) return true;
+      // 子序列匹配：query 的每个字符按顺序出现在 target 中即可
+      let qi = 0;
+      for (let ti = 0; ti < target.length && qi < query.length; ti++) {
+        if (target[ti] === query[qi]) qi++;
+      }
+      return qi === query.length;
     };
     const onFilterChange = (v) => {
       treeRef.value?.filter(v);
@@ -910,6 +982,14 @@ const HomeView = {
       tagCloudData,
       tagCloudLoading,
       tagCloudPositions,
+      tagCloudView,
+      tagCloudCanvasStyle,
+      onTagCloudWheel,
+      onTagCloudMouseDown,
+      onTagCloudMouseMove,
+      onTagCloudMouseUp,
+      onTagCloudItemClick,
+      resetTagCloudView,
       // 保存与文件列表
       saveLoading,
       saveFinal,
@@ -1059,16 +1139,33 @@ const HomeView = {
 
             <!-- 标签云 -->
             <div class="tag-cloud-section" v-loading="tagCloudLoading">
-              <div class="tag-cloud-title">☁️ 标签云</div>
+              <div class="tag-cloud-title">
+                <span>☁️ 标签云</span>
+                <span class="tag-cloud-tools">
+                  <span class="tag-cloud-zoom">{{ Math.round(tagCloudView.scale * 100) }}%</span>
+                  <el-button size="small" link @click="resetTagCloudView" title="重置视图">⟳ 重置</el-button>
+                </span>
+              </div>
               <div v-if="!tagCloudData.length" style="color:#c0c4cc;font-size:13px;text-align:center;padding:20px 0;">暂无标签使用数据</div>
-              <div v-else class="tag-cloud-container">
-                <el-tooltip v-for="t in tagCloudPositions" :key="t.id" :content="t.name + '（' + t.count + ' 个文件）'" placement="top" :show-after="300">
-                  <span
-                    :style="t.style"
-                    class="tag-cloud-item"
-                    @click="filterByTag(t)"
-                  >{{ t.name }}</span>
-                </el-tooltip>
+              <div
+                v-else
+                class="tag-cloud-container"
+                @wheel="onTagCloudWheel"
+                @mousedown="onTagCloudMouseDown"
+                @mousemove="onTagCloudMouseMove"
+                @mouseup="onTagCloudMouseUp"
+                @mouseleave="onTagCloudMouseUp"
+              >
+                <div :style="tagCloudCanvasStyle">
+                  <el-tooltip v-for="t in tagCloudPositions" :key="t.id" :content="t.name + '（' + t.count + ' 个文件）'" placement="top" :show-after="300">
+                    <span
+                      :style="t.style"
+                      class="tag-cloud-item"
+                      @click="onTagCloudItemClick(t, $event)"
+                    >{{ t.name }}</span>
+                  </el-tooltip>
+                </div>
+                <div class="tag-cloud-hint">滚轮缩放 · 拖拽平移</div>
               </div>
             </div>
           </div>

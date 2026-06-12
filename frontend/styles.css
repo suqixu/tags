@@ -253,6 +253,23 @@ body {
   font-weight: 600;
   margin-bottom: 14px;
   color: #303133;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tag-cloud-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: normal;
+  color: #909399;
+}
+.tag-cloud-zoom {
+  display: inline-block;
+  min-width: 38px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .tag-cloud-container {
   position: relative;
@@ -261,17 +278,32 @@ body {
   height: 300px;
   margin: 0 auto;
   overflow: hidden;
+  cursor: grab;
+  background: #fafbfc;
+  border-radius: 6px;
+  border: 1px dashed #ebeef5;
+}
+.tag-cloud-container:active {
+  cursor: grabbing;
+}
+.tag-cloud-hint {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 11px;
+  color: #c0c4cc;
+  pointer-events: none;
+  user-select: none;
 }
 .tag-cloud-item {
   border-radius: 4px;
-  transition: all 0.25s ease;
+  transition: background 0.2s ease, text-shadow 0.2s ease;
   font-weight: 500;
   white-space: nowrap;
   user-select: none;
 }
 .tag-cloud-item:hover {
   background: rgba(64, 158, 255, 0.12);
-  transform: scale(1.18);
   text-shadow: 0 0 8px rgba(64, 158, 255, 0.4);
   z-index: 10;
 }
