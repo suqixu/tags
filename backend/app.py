@@ -9,6 +9,8 @@ import os
 import sqlite3
 import hashlib
 import datetime
+import threading
+import uuid
 from functools import wraps
 from typing import Optional, List
 
@@ -30,6 +32,10 @@ INITIAL_PASSWORD = "admin123"
 
 app = Flask(__name__, static_folder=None)
 CORS(app, supports_credentials=True)
+
+# --------- 异步导入任务状态 ---------
+# task_id -> { status: "running"|"done"|"error", total: int, created: int, msg: str }
+import_tasks = {}
 
 
 # --------- 数据库工具 ---------
@@ -633,106 +639,157 @@ def list_files():
     })
 
 
+def _do_import_in_background(task_id: str, lines: list):
+    """后台线程执行导入"""
+    import re as _re
+
+    task = import_tasks[task_id]
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.row_factory = sqlite3.Row
+
+    created_count = 0
+    current_category = None
+    tag_cache = {}
+    BATCH_SIZE = 500
+
+    try:
+        for line in lines:
+            m = _re.match(r"^\[([^\]]*)\](.*)$", line)
+            file_date = None
+            if m:
+                bracket_content = m.group(1)
+                rest = m.group(2).strip()
+                if _re.match(r"^\d{8}$", bracket_content):
+                    body = rest
+                    file_date = f"{bracket_content[:4]}-{bracket_content[4:6]}-{bracket_content[6:8]}"
+                else:
+                    current_category = bracket_content.strip()
+                    continue
+            else:
+                body = line
+
+            idx = body.rfind("_")
+            if idx == -1:
+                file_name = body.strip()
+                tag_names = []
+            else:
+                file_name = body[:idx].strip()
+                tag_part = body[idx + 1:]
+                tag_names = [t.strip() for t in tag_part.split(".") if t.strip()]
+
+            if not file_name:
+                continue
+
+            if current_category and current_category not in tag_names:
+                tag_names.append(current_category)
+
+            # 查找/创建标签（使用缓存）
+            tag_ids = []
+            for tname in tag_names:
+                if tname in tag_cache:
+                    tag_ids.append(tag_cache[tname])
+                else:
+                    row = conn.execute("SELECT id FROM tags WHERE name=?", (tname,)).fetchone()
+                    if row:
+                        tag_cache[tname] = row["id"]
+                        tag_ids.append(row["id"])
+                    else:
+                        cur_tag = conn.execute(
+                            "INSERT INTO tags(name, parent_id) VALUES(?, NULL)", (tname,)
+                        )
+                        tag_cache[tname] = cur_tag.lastrowid
+                        tag_ids.append(cur_tag.lastrowid)
+
+            if file_date:
+                created_at = f"{file_date} 00:00:00"
+            else:
+                created_at = None
+            cur = conn.execute(
+                "INSERT INTO files(name, created_at, updated_at) "
+                "VALUES(?, COALESCE(?, datetime('now','localtime')), datetime('now','localtime'))",
+                (file_name, created_at),
+            )
+            file_id = cur.lastrowid
+            for pos, tid in enumerate(tag_ids):
+                conn.execute(
+                    "INSERT INTO file_tags(file_id, tag_id, position) VALUES(?, ?, ?)",
+                    (file_id, tid, pos),
+                )
+            created_count += 1
+
+            # 分批提交
+            if created_count % BATCH_SIZE == 0:
+                conn.commit()
+                task["created"] = created_count
+
+        conn.commit()
+        task["created"] = created_count
+        task["status"] = "done"
+        task["msg"] = f"导入完成，共 {created_count} 条"
+    except Exception as e:
+        task["status"] = "error"
+        task["msg"] = f"导入失败: {str(e)}"
+    finally:
+        conn.close()
+
+
 @app.post("/api/files/import")
 @auth_required
 def import_files():
-    """批量导入文件
+    """批量导入文件（异步）
     入参: { text: str }
-    解析规则与前端一致：每行一条，格式 [日期]文件名_标签1.标签2.标签3
-    支持大批量导入（5000+ 条），分批提交避免超时。
+    立即返回 task_id，后台线程执行导入，前端轮询 /api/files/import/status 获取进度。
     """
-    import re as _re
     data = request.get_json(silent=True) or {}
     text = data.get("text") or ""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
         return jsonify({"code": 400, "msg": "内容为空"}), 400
 
-    db = get_db()
-    created_count = 0
-    current_category = None  # 当前分类标签名
-    tag_cache = {}  # 标签名 -> id 缓存，避免重复查询
+    task_id = uuid.uuid4().hex[:12]
+    import_tasks[task_id] = {
+        "status": "running",
+        "total": len(lines),
+        "created": 0,
+        "msg": "导入中...",
+    }
 
-    BATCH_SIZE = 500  # 每 500 条提交一次
+    t = threading.Thread(target=_do_import_in_background, args=(task_id, lines), daemon=True)
+    t.start()
 
-    for line in lines:
-        # 判断是否是 [xxx] 格式的行
-        m = _re.match(r"^\[([^\]]*)\](.*)$", line)
-        file_date = None
-        if m:
-            bracket_content = m.group(1)
-            rest = m.group(2).strip()
-            # 如果方括号内是8位纯数字，视为日期行（文件行）
-            if _re.match(r"^\d{8}$", bracket_content):
-                body = rest
-                # 解析日期: 20250606 -> 2025-06-06
-                file_date = f"{bracket_content[:4]}-{bracket_content[4:6]}-{bracket_content[6:8]}"
-            else:
-                # 非日期格式，视为分类标签行
-                current_category = bracket_content.strip()
-                continue
+    return jsonify({"code": 0, "msg": "导入任务已启动", "data": {"taskId": task_id}})
+
+
+@app.get("/api/files/import/status")
+@auth_required
+def import_status():
+    """查询导入任务进度"""
+    task_id = request.args.get("taskId") or ""
+    task = import_tasks.get(task_id)
+    if not task:
+        return jsonify({"code": 404, "msg": "任务不存在"}), 404
+
+    resp = {
+        "code": 0,
+        "data": {
+            "taskId": task_id,
+            "status": task["status"],
+            "total": task["total"],
+            "created": task["created"],
+            "msg": task["msg"],
+        },
+    }
+
+    # 任务结束后清理（延迟清理，让前端有机会拿到最终状态）
+    if task["status"] in ("done", "error"):
+        # 标记待清理，下次查询时删除
+        if task.get("_queried_final"):
+            del import_tasks[task_id]
         else:
-            body = line
+            task["_queried_final"] = True
 
-        # 最后一个 "_" 之后是标签部分
-        idx = body.rfind("_")
-        if idx == -1:
-            file_name = body.strip()
-            tag_names = []
-        else:
-            file_name = body[:idx].strip()
-            tag_part = body[idx + 1:]
-            tag_names = [t.strip() for t in tag_part.split(".") if t.strip()]
-
-        if not file_name:
-            continue
-
-        # 如果当前有分类标签，追加到标签列表
-        if current_category and current_category not in tag_names:
-            tag_names.append(current_category)
-
-        # 查找对应的 tag id，不存在则自动创建（使用缓存）
-        tag_ids = []
-        for tname in tag_names:
-            if tname in tag_cache:
-                tag_ids.append(tag_cache[tname])
-            else:
-                row = db.execute("SELECT id FROM tags WHERE name=?", (tname,)).fetchone()
-                if row:
-                    tag_cache[tname] = row["id"]
-                    tag_ids.append(row["id"])
-                else:
-                    cur_tag = db.execute(
-                        "INSERT INTO tags(name, parent_id) VALUES(?, NULL)", (tname,)
-                    )
-                    tag_cache[tname] = cur_tag.lastrowid
-                    tag_ids.append(cur_tag.lastrowid)
-
-        # 使用解析到的日期，没有则使用当前时间
-        if file_date:
-            created_at = f"{file_date} 00:00:00"
-        else:
-            created_at = None
-        cur = db.execute(
-            "INSERT INTO files(name, created_at, updated_at) "
-            "VALUES(?, COALESCE(?, datetime('now','localtime')), datetime('now','localtime'))",
-            (file_name, created_at),
-        )
-        file_id = cur.lastrowid
-        for pos, tid in enumerate(tag_ids):
-            db.execute(
-                "INSERT INTO file_tags(file_id, tag_id, position) VALUES(?, ?, ?)",
-                (file_id, tid, pos),
-            )
-        created_count += 1
-
-        # 分批提交，避免大事务超时
-        if created_count % BATCH_SIZE == 0:
-            db.commit()
-
-    # 提交剩余部分
-    db.commit()
-    return jsonify({"code": 0, "msg": f"导入完成，共 {created_count} 条", "data": {"created": created_count}})
+    return jsonify(resp)
 
 
 @app.get("/api/files/export")

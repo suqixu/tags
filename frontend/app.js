@@ -343,6 +343,7 @@ const HomeView = {
       });
       return results;
     });
+    const importProgress = reactive({ visible: false, total: 0, created: 0, status: "" });
     const submitFileImport = async () => {
       if (!fileImportParsed.value.length) {
         ElMessage.warning("没有解析到可导入的文件");
@@ -352,15 +353,46 @@ const HomeView = {
       try {
         const { data } = await http.post("/api/files/import", {
           text: fileImportDialog.text,
-        }, { timeout: 120000 });
+        });
         if (data.code === 0) {
-          ElMessage.success(data.msg || "导入成功");
+          const taskId = data.data.taskId;
           fileImportDialog.visible = false;
-          await loadFiles();
-          loadTagCloud();
+          fileImportDialog.loading = false;
+          // 显示进度提示
+          importProgress.visible = true;
+          importProgress.total = fileImportParsed.value.length;
+          importProgress.created = 0;
+          importProgress.status = "running";
+          // 轮询进度
+          const poll = setInterval(async () => {
+            try {
+              const { data: st } = await http.get("/api/files/import/status", { params: { taskId } });
+              if (st.code === 0) {
+                importProgress.created = st.data.created;
+                importProgress.status = st.data.status;
+                if (st.data.status === "done") {
+                  clearInterval(poll);
+                  importProgress.visible = false;
+                  ElMessage.success(st.data.msg || "导入完成");
+                  await loadFiles();
+                  loadTagCloud();
+                } else if (st.data.status === "error") {
+                  clearInterval(poll);
+                  importProgress.visible = false;
+                  ElMessage.error(st.data.msg || "导入失败");
+                }
+              }
+            } catch (e) {
+              clearInterval(poll);
+              importProgress.visible = false;
+              ElMessage.error("查询导入进度失败");
+            }
+          }, 1000);
         } else {
           ElMessage.error(data.msg || "导入失败");
         }
+      } catch (e) {
+        // 请求本身失败
       } finally {
         fileImportDialog.loading = false;
       }
@@ -886,6 +918,7 @@ const HomeView = {
       openFileImport,
       handleFileImportUpload,
       submitFileImport,
+      importProgress,
       exportDialog,
       openExportDialog,
       exportFiles,
@@ -1252,6 +1285,14 @@ const HomeView = {
             @click="submitFileImport"
           >导入 {{ fileImportParsed.length ? '(' + fileImportParsed.length + ' 条)' : '' }}</el-button>
         </template>
+      </el-dialog>
+
+      <!-- 导入进度 -->
+      <el-dialog v-model="importProgress.visible" title="正在导入..." width="400px" :close-on-click-modal="false" :show-close="false">
+        <div style="text-align:center;padding:20px 0;">
+          <el-progress :percentage="importProgress.total ? Math.round(importProgress.created / importProgress.total * 100) : 0" :stroke-width="16" style="margin-bottom:16px;" />
+          <p style="color:#606266;font-size:14px;">已导入 {{ importProgress.created }} / {{ importProgress.total }} 条</p>
+        </div>
       </el-dialog>
 
       <!-- 新增/编辑 Tag -->
