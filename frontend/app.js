@@ -352,7 +352,7 @@ const HomeView = {
       try {
         const { data } = await http.post("/api/files/import", {
           text: fileImportDialog.text,
-        });
+        }, { timeout: 120000 });
         if (data.code === 0) {
           ElMessage.success(data.msg || "导入成功");
           fileImportDialog.visible = false;

@@ -639,6 +639,7 @@ def import_files():
     """批量导入文件
     入参: { text: str }
     解析规则与前端一致：每行一条，格式 [日期]文件名_标签1.标签2.标签3
+    支持大批量导入（5000+ 条），分批提交避免超时。
     """
     import re as _re
     data = request.get_json(silent=True) or {}
@@ -650,6 +651,9 @@ def import_files():
     db = get_db()
     created_count = 0
     current_category = None  # 当前分类标签名
+    tag_cache = {}  # 标签名 -> id 缓存，避免重复查询
+
+    BATCH_SIZE = 500  # 每 500 条提交一次
 
     for line in lines:
         # 判断是否是 [xxx] 格式的行
@@ -687,17 +691,22 @@ def import_files():
         if current_category and current_category not in tag_names:
             tag_names.append(current_category)
 
-        # 查找对应的 tag id，不存在则自动创建
+        # 查找对应的 tag id，不存在则自动创建（使用缓存）
         tag_ids = []
         for tname in tag_names:
-            row = db.execute("SELECT id FROM tags WHERE name=?", (tname,)).fetchone()
-            if row:
-                tag_ids.append(row["id"])
+            if tname in tag_cache:
+                tag_ids.append(tag_cache[tname])
             else:
-                cur_tag = db.execute(
-                    "INSERT INTO tags(name, parent_id) VALUES(?, NULL)", (tname,)
-                )
-                tag_ids.append(cur_tag.lastrowid)
+                row = db.execute("SELECT id FROM tags WHERE name=?", (tname,)).fetchone()
+                if row:
+                    tag_cache[tname] = row["id"]
+                    tag_ids.append(row["id"])
+                else:
+                    cur_tag = db.execute(
+                        "INSERT INTO tags(name, parent_id) VALUES(?, NULL)", (tname,)
+                    )
+                    tag_cache[tname] = cur_tag.lastrowid
+                    tag_ids.append(cur_tag.lastrowid)
 
         # 使用解析到的日期，没有则使用当前时间
         if file_date:
@@ -717,6 +726,11 @@ def import_files():
             )
         created_count += 1
 
+        # 分批提交，避免大事务超时
+        if created_count % BATCH_SIZE == 0:
+            db.commit()
+
+    # 提交剩余部分
     db.commit()
     return jsonify({"code": 0, "msg": f"导入完成，共 {created_count} 条", "data": {"created": created_count}})
 
