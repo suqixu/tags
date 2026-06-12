@@ -649,6 +649,7 @@ def _do_import_in_background(task_id: str, lines: list):
     conn.row_factory = sqlite3.Row
 
     created_count = 0
+    failed_count = 0
     current_category = None
     tag_cache = {}
     BATCH_SIZE = 500
@@ -684,6 +685,10 @@ def _do_import_in_background(task_id: str, lines: list):
             if current_category and current_category not in tag_names:
                 tag_names.append(current_category)
 
+            # 标签名去重（保持原顺序），避免 file_tags 复合主键冲突
+            _seen = set()
+            tag_names = [t for t in tag_names if not (t in _seen or _seen.add(t))]
+
             # 查找/创建标签（使用缓存）
             tag_ids = []
             for tname in tag_names:
@@ -705,28 +710,46 @@ def _do_import_in_background(task_id: str, lines: list):
                 created_at = f"{file_date} 00:00:00"
             else:
                 created_at = None
-            cur = conn.execute(
-                "INSERT INTO files(name, created_at, updated_at) "
-                "VALUES(?, COALESCE(?, datetime('now','localtime')), datetime('now','localtime'))",
-                (file_name, created_at),
-            )
-            file_id = cur.lastrowid
-            for pos, tid in enumerate(tag_ids):
-                conn.execute(
-                    "INSERT INTO file_tags(file_id, tag_id, position) VALUES(?, ?, ?)",
-                    (file_id, tid, pos),
+
+            # tag_ids 再次去重，防御性处理
+            seen_tid = set()
+            unique_tag_ids = [t for t in tag_ids if not (t in seen_tid or seen_tid.add(t))]
+
+            try:
+                cur = conn.execute(
+                    "INSERT INTO files(name, created_at, updated_at) "
+                    "VALUES(?, COALESCE(?, datetime('now','localtime')), datetime('now','localtime'))",
+                    (file_name, created_at),
                 )
-            created_count += 1
+                file_id = cur.lastrowid
+                for pos, tid in enumerate(unique_tag_ids):
+                    # 使用 OR IGNORE 避免极端情况下的复合主键冲突导致整批失败
+                    conn.execute(
+                        "INSERT OR IGNORE INTO file_tags(file_id, tag_id, position) VALUES(?, ?, ?)",
+                        (file_id, tid, pos),
+                    )
+                created_count += 1
+            except Exception as ex:
+                # 单条失败不影响整批：回滚当前未提交事务，记录失败
+                failed_count += 1
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                task["msg"] = f"导入中... (已跳过 {failed_count} 条异常: {str(ex)[:80]})"
 
             # 分批提交
-            if created_count % BATCH_SIZE == 0:
+            if created_count % BATCH_SIZE == 0 and created_count > 0:
                 conn.commit()
                 task["created"] = created_count
 
         conn.commit()
         task["created"] = created_count
         task["status"] = "done"
-        task["msg"] = f"导入完成，共 {created_count} 条"
+        if failed_count:
+            task["msg"] = f"导入完成，成功 {created_count} 条，跳过 {failed_count} 条异常"
+        else:
+            task["msg"] = f"导入完成，共 {created_count} 条"
     except Exception as e:
         task["status"] = "error"
         task["msg"] = f"导入失败: {str(e)}"
