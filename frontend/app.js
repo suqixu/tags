@@ -455,12 +455,10 @@ const HomeView = {
       transformOrigin: '0 0',
       width: '500px',
       height: '300px',
-      position: 'absolute',
-      left: 0,
-      top: 0,
+      position: 'relative',
     }));
     const onTagCloudWheel = (e) => {
-      e.preventDefault();
+      // preventDefault 由模板 @wheel.prevent 处理
       const container = e.currentTarget;
       const rect = container.getBoundingClientRect();
       // 鼠标在容器中的坐标
@@ -1150,7 +1148,7 @@ const HomeView = {
               <div
                 v-else
                 class="tag-cloud-container"
-                @wheel="onTagCloudWheel"
+                @wheel.prevent="onTagCloudWheel"
                 @mousedown="onTagCloudMouseDown"
                 @mousemove="onTagCloudMouseMove"
                 @mouseup="onTagCloudMouseUp"
