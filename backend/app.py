@@ -79,6 +79,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             parent_id INTEGER,
+            priority INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
             FOREIGN KEY(parent_id) REFERENCES tags(id) ON DELETE CASCADE
         );
@@ -99,6 +100,24 @@ def init_db():
     if "updated_at" not in cols:
         cur.execute("ALTER TABLE files ADD COLUMN updated_at TEXT")
         cur.execute("UPDATE files SET updated_at = created_at WHERE updated_at IS NULL")
+    # 兼容旧库：如果 tags 表没有 priority 字段，做一次迁移
+    tag_cols = [r[1] for r in cur.execute("PRAGMA table_info(tags)").fetchall()]
+    if "priority" not in tag_cols:
+        cur.execute("ALTER TABLE tags ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+    # 兼容旧库：将已有的 [xxx] 格式标签名去掉中括号，统一为普通标签
+    import re as _re_init
+    bracket_rows = cur.execute("SELECT id, name FROM tags WHERE name LIKE '[%]'").fetchall()
+    for br in bracket_rows:
+        old_name = br[1]
+        m = _re_init.match(r"^\[(.+)\]$", old_name)
+        if m:
+            new_name = m.group(1)
+            # 检查去掉中括号后是否与同级已有标签重名
+            dup = cur.execute(
+                "SELECT id FROM tags WHERE name=? AND id<>?", (new_name, br[0])
+            ).fetchone()
+            if not dup:
+                cur.execute("UPDATE tags SET name=? WHERE id=?", (new_name, br[0]))
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS file_tags (
@@ -243,6 +262,7 @@ def serialize_tag(row) -> dict:
         "id": row["id"],
         "name": row["name"],
         "parentId": row["parent_id"],
+        "priority": row["priority"] if "priority" in row.keys() else 0,
         "createdAt": row["created_at"],
     }
 
@@ -252,7 +272,7 @@ def serialize_tag(row) -> dict:
 def list_tags():
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, parent_id, created_at FROM tags ORDER BY parent_id IS NOT NULL, parent_id, id"
+        "SELECT id, name, parent_id, priority, created_at FROM tags ORDER BY parent_id IS NOT NULL, parent_id, id"
     ).fetchall()
     return jsonify({"code": 0, "data": [serialize_tag(r) for r in rows]})
 
@@ -263,6 +283,7 @@ def create_tag():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     parent_id = data.get("parentId")
+    priority = data.get("priority", 0)
     if not name:
         return jsonify({"code": 400, "msg": "Tag 名称不能为空"}), 400
 
@@ -281,13 +302,13 @@ def create_tag():
         return jsonify({"code": 400, "msg": "同级下已存在同名 tag"}), 400
 
     cur = db.execute(
-        "INSERT INTO tags(name, parent_id) VALUES(?, ?)",
-        (name, parent_id if parent_id else None),
+        "INSERT INTO tags(name, parent_id, priority) VALUES(?, ?, ?)",
+        (name, parent_id if parent_id else None, int(priority) if priority else 0),
     )
     db.commit()
     new_id = cur.lastrowid
     row = db.execute(
-        "SELECT id, name, parent_id, created_at FROM tags WHERE id=?", (new_id,)
+        "SELECT id, name, parent_id, priority, created_at FROM tags WHERE id=?", (new_id,)
     ).fetchone()
     return jsonify({"code": 0, "data": serialize_tag(row)})
 
@@ -315,13 +336,15 @@ def update_tag(tag_id):
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     parent_id = data.get("parentId", "__no_change__")
+    priority = data.get("priority", "__no_change__")
 
     db = get_db()
-    row = db.execute("SELECT id, name, parent_id FROM tags WHERE id=?", (tag_id,)).fetchone()
+    row = db.execute("SELECT id, name, parent_id, priority FROM tags WHERE id=?", (tag_id,)).fetchone()
     if not row:
         return jsonify({"code": 404, "msg": "tag 不存在"}), 404
 
     new_name = name or row["name"]
+    new_priority = int(priority) if priority != "__no_change__" else row["priority"]
     if parent_id == "__no_change__":
         new_parent = row["parent_id"]
     else:
@@ -347,12 +370,12 @@ def update_tag(tag_id):
         return jsonify({"code": 400, "msg": "同级下已存在同名 tag"}), 400
 
     db.execute(
-        "UPDATE tags SET name=?, parent_id=? WHERE id=?",
-        (new_name, new_parent, tag_id),
+        "UPDATE tags SET name=?, parent_id=?, priority=? WHERE id=?",
+        (new_name, new_parent, new_priority, tag_id),
     )
     db.commit()
     row = db.execute(
-        "SELECT id, name, parent_id, created_at FROM tags WHERE id=?", (tag_id,)
+        "SELECT id, name, parent_id, priority, created_at FROM tags WHERE id=?", (tag_id,)
     ).fetchone()
     return jsonify({"code": 0, "data": serialize_tag(row)})
 
@@ -411,7 +434,7 @@ def bulk_create_tags():
         )
         new_id = cur.lastrowid
         row = db.execute(
-            "SELECT id, name, parent_id, created_at FROM tags WHERE id=?", (new_id,)
+            "SELECT id, name, parent_id, priority, created_at FROM tags WHERE id=?", (new_id,)
         ).fetchone()
         created.append(serialize_tag(row))
         existing.add(n)
@@ -423,6 +446,64 @@ def bulk_create_tags():
             "data": {"created": created, "skipped": skipped},
         }
     )
+
+
+@app.post("/api/tags/batch-move")
+@auth_required
+def batch_move_tags():
+    """批量移动标签到指定父级。
+    入参: { ids: [int], targetParentId: int|null }
+    """
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids") or []
+    target_parent_id = data.get("targetParentId")  # null 表示移动到顶级
+
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"code": 400, "msg": "请选择要移动的标签"}), 400
+
+    db = get_db()
+
+    # 验证目标父级存在
+    if target_parent_id:
+        parent_row = db.execute("SELECT id FROM tags WHERE id=?", (target_parent_id,)).fetchone()
+        if not parent_row:
+            return jsonify({"code": 400, "msg": "目标父级标签不存在"}), 400
+        # 不允许移动到自己的子孙下面
+        for tag_id in ids:
+            if tag_id == target_parent_id:
+                return jsonify({"code": 400, "msg": "不能将标签移动到自身下"}), 400
+            if is_descendant(db, target_parent_id, tag_id):
+                tag_row = db.execute("SELECT name FROM tags WHERE id=?", (tag_id,)).fetchone()
+                tag_name = tag_row["name"] if tag_row else str(tag_id)
+                return jsonify({"code": 400, "msg": f"不能将 \"{tag_name}\" 移动到它自己的子孙下"}), 400
+
+    # 获取目标级已有的标签名（用于重名检测）
+    existing_rows = db.execute(
+        "SELECT name FROM tags WHERE IFNULL(parent_id,0)=IFNULL(?,0) AND id NOT IN ({})".format(
+            ",".join("?" * len(ids))
+        ),
+        [target_parent_id] + ids,
+    ).fetchall()
+    existing_names = {r["name"] for r in existing_rows}
+
+    moved = 0
+    skipped = []
+    for tag_id in ids:
+        row = db.execute("SELECT id, name FROM tags WHERE id=?", (tag_id,)).fetchone()
+        if not row:
+            continue
+        if row["name"] in existing_names:
+            skipped.append(row["name"])
+            continue
+        db.execute("UPDATE tags SET parent_id=? WHERE id=?", (target_parent_id if target_parent_id else None, tag_id))
+        existing_names.add(row["name"])
+        moved += 1
+
+    db.commit()
+    msg = f"已移动 {moved} 个标签"
+    if skipped:
+        msg += f"，跳过 {len(skipped)} 个（目标级下已有同名）"
+    return jsonify({"code": 0, "msg": msg})
 
 
 @app.get("/api/tags/stats")
@@ -656,19 +737,40 @@ def _do_import_in_background(task_id: str, lines: list):
 
     try:
         for line in lines:
-            m = _re.match(r"^\[([^\]]*)\](.*)$", line)
+            # 解析行首所有 [xxx] 方括号内容
             file_date = None
-            if m:
-                bracket_content = m.group(1)
-                rest = m.group(2).strip()
+            bracket_tags = []  # 方括号内的标签（去掉[]作为普通标签存储）
+            rest = line
+            while True:
+                bm = _re.match(r"^\[([^\]]*)\](.*)$", rest)
+                if not bm:
+                    break
+                bracket_content = bm.group(1).strip()
+                rest = bm.group(2)
                 if _re.match(r"^\d{8}$", bracket_content):
-                    body = rest
+                    # 日期
                     file_date = f"{bracket_content[:4]}-{bracket_content[4:6]}-{bracket_content[6:8]}"
                 else:
-                    current_category = bracket_content.strip()
+                    # 非日期的方括号内容作为普通标签（不带[]存储）
+                    if bracket_content:
+                        bracket_tags.append(bracket_content)
+
+            # 如果整行只有一个非日期的方括号且后面没有内容，视为分类标题
+            if not rest.strip() and not bracket_tags and not file_date:
+                # 原始行只有一个方括号且不是日期 -> 分类
+                bm2 = _re.match(r"^\[([^\]]*)\]$", line.strip())
+                if bm2:
+                    current_category = bm2.group(1).strip()
                     continue
-            else:
-                body = line
+                else:
+                    continue
+            if not rest.strip() and bracket_tags and not file_date:
+                # 整行只有 [非日期方括号]，没有文件名部分 -> 视为分类标题
+                if len(bracket_tags) == 1 and not _re.match(r"^\[([^\]]*)\](.+)$", line.strip()):
+                    current_category = bracket_tags[0]
+                    continue
+
+            body = rest
 
             idx = body.rfind("_")
             if idx == -1:
@@ -681,6 +783,11 @@ def _do_import_in_background(task_id: str, lines: list):
 
             if not file_name:
                 continue
+
+            # 将方括号内解析出的标签加入 tag_names（已去掉[]）
+            for bt in bracket_tags:
+                if bt not in tag_names:
+                    tag_names.append(bt)
 
             if current_category and current_category not in tag_names:
                 tag_names.append(current_category)
@@ -856,21 +963,30 @@ def export_files():
         name = r["name"]
         date_str = (r["created_at"] or "")[:10].replace("-", "")
         tag_rows = db.execute(
-            "SELECT t.id, t.name FROM file_tags ft JOIN tags t ON t.id=ft.tag_id "
+            "SELECT t.id, t.name, t.priority FROM file_tags ft JOIN tags t ON t.id=ft.tag_id "
             "WHERE ft.file_id=? ORDER BY ft.position ASC",
             (file_id,),
         ).fetchall()
-        tag_names = [t["name"] for t in tag_rows]
         tag_id_list = [t["id"] for t in tag_rows]
-        tag_part = ".".join(tag_names)
-        display = f"[{date_str}]{name}_{tag_part}" if tag_part else f"[{date_str}]{name}"
+
+        # 所有标签按 priority 降序排列（优先级高的排前面）
+        sorted_tags = sorted(tag_rows, key=lambda t: t["priority"], reverse=True)
+        all_tag_names = [t["name"] for t in sorted_tags]
+
+        # 构建显示行：[日期]文件名_标签1.标签2
+        tag_part = ".".join(all_tag_names)
+        if tag_part:
+            display = f"[{date_str}]{name}_{tag_part}"
+        else:
+            display = f"[{date_str}]{name}"
+
         file_data.append({
             "id": file_id,
             "name": name,
             "date_str": date_str,
             "display": display,
             "tag_ids": tag_id_list,
-            "tag_names": tag_names,
+            "tag_names": all_tag_names,
         })
 
     # 排序

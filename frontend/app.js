@@ -84,8 +84,20 @@ const HomeView = {
     const treeRef = ref(null);
     const filterText = ref("");
 
-    // 树形结构
-    const tagTree = computed(() => buildTree(tags.value));
+    // 树形结构（包含虚拟"全部标签"根节点，方便全选操作）
+    const VIRTUAL_ALL_ID = "__all__";
+    const tagTree = computed(() => {
+      const realTree = buildTree(tags.value);
+      return [{
+        id: VIRTUAL_ALL_ID,
+        name: "全部标签",
+        childCount: tags.value.length,
+        children: realTree,
+        _virtual: true,
+      }];
+    });
+    // 不含虚拟根节点的树（用于 el-tree-select 下拉选择）
+    const tagTreeNoVirtual = computed(() => buildTree(tags.value));
 
     // ----- 弹窗状态 -----
     const editDialog = reactive({
@@ -94,6 +106,7 @@ const HomeView = {
       id: null,
       name: "",
       parentId: null,
+      priority: 0,
       title: "新增 Tag",
     });
     const pwdDialog = reactive({
@@ -187,23 +200,37 @@ const HomeView = {
       if (tagPart) out += (base ? "_" : "") + tagPart;
       return out;
     });
-    // 树勾选变化：保持"勾选顺序"
+    // 树勾选变化：级联选中子级，同步文件列表的标签筛选
     const onTreeCheck = (data, checked) => {
-      // data 是被点击的节点
-      if (checked.checkedKeys.includes(data.id)) {
-        if (!selectedTags.value.find((t) => t.id === data.id)) {
-          selectedTags.value.push({ id: data.id, name: data.name });
+      // 获取实际勾选的 key，排除虚拟"全部标签"节点
+      const realChecked = checked.checkedKeys.filter((k) => k !== VIRTUAL_ALL_ID);
+      // 根据 tags 平铺列表重建 selectedTags（保持已有顺序，追加新增的）
+      const checkedSet = new Set(realChecked);
+      // 保留已有且仍勾选的
+      const kept = selectedTags.value.filter((t) => checkedSet.has(t.id));
+      const keptIds = new Set(kept.map((t) => t.id));
+      // 追加新勾选的
+      const tagMap = new Map(tags.value.map((t) => [t.id, t]));
+      realChecked.forEach((id) => {
+        if (!keptIds.has(id) && tagMap.has(id)) {
+          kept.push({ id, name: tagMap.get(id).name });
         }
-      } else {
-        const i = selectedTags.value.findIndex((t) => t.id === data.id);
-        if (i !== -1) selectedTags.value.splice(i, 1);
-      }
+      });
+      selectedTags.value = kept;
+      // 同步标签筛选到文件列表并重新查询
+      fileQuery.tagIds = selectedTags.value.map((t) => t.id);
+      filePagination.page = 1;
+      loadFiles();
     };
     const checkedKeys = computed(() => selectedTags.value.map((t) => t.id));
     const removeSelected = (id) => {
       const i = selectedTags.value.findIndex((t) => t.id === id);
       if (i !== -1) selectedTags.value.splice(i, 1);
       treeRef.value?.setChecked(id, false, false);
+      // 同步标签筛选
+      fileQuery.tagIds = selectedTags.value.map((t) => t.id);
+      filePagination.page = 1;
+      loadFiles();
     };
     const moveSelected = (idx, delta) => {
       const arr = selectedTags.value;
@@ -212,8 +239,36 @@ const HomeView = {
       [arr[idx], arr[j]] = [arr[j], arr[idx]];
     };
     const clearSelected = () => {
-      selectedTags.value.forEach((t) => treeRef.value?.setChecked(t.id, false, false));
+      treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
       selectedTags.value = [];
+      // 同步标签筛选
+      fileQuery.tagIds = [];
+      filePagination.page = 1;
+      loadFiles();
+    };
+    // 文件名生成器中通过搜索选择标签
+    const genTagPickIds = computed({
+      get: () => selectedTags.value.map((t) => t.id),
+      set: () => { /* 由 onGenTagPick 处理 */ },
+    });
+    const onGenTagPick = (ids) => {
+      // 以 ids 为准重建 selectedTags（保持已有顺序，追加新增）
+      const tagMap = new Map(tags.value.map((t) => [t.id, t]));
+      const kept = selectedTags.value.filter((t) => ids.includes(t.id));
+      const keptIds = new Set(kept.map((t) => t.id));
+      ids.forEach((id) => {
+        if (!keptIds.has(id) && tagMap.has(id)) {
+          kept.push({ id, name: tagMap.get(id).name });
+        }
+      });
+      selectedTags.value = kept;
+      // 同步左侧树勾选
+      treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
+      selectedTags.value.forEach((t) => treeRef.value?.setChecked(t.id, true, false));
+      // 同步文件列表筛选
+      fileQuery.tagIds = selectedTags.value.map((t) => t.id);
+      filePagination.page = 1;
+      loadFiles();
     };
     // 拖拽排序
     const onDragStart = (idx) => { dragIndex.value = idx; };
@@ -300,9 +355,17 @@ const HomeView = {
         const m = s.match(/^\[([^\]]*)\](.*)$/);
         if (m) {
           const bracketContent = m[1];
-          const rest = m[2].trim();
+          let rest = m[2].trim();
           // 8位纯数字视为日期（文件行）
           if (/^\d{8}$/.test(bracketContent)) {
+            // 日期后可能还有 [xxx] 方括号标签，逐个解析（去掉[]作为普通标签）
+            const extraTags = [];
+            let bm;
+            while ((bm = rest.match(/^\[([^\]]*)\](.*)$/))) {
+              const inner = bm[1].trim();
+              rest = bm[2];
+              if (inner) extraTags.push(inner);
+            }
             // 文件行
             const body = rest;
             const idx = body.lastIndexOf("_");
@@ -315,6 +378,8 @@ const HomeView = {
               tagPart = body.slice(idx + 1);
             }
             const tagNames = tagPart ? tagPart.split(".").map((t) => t.trim()).filter(Boolean) : [];
+            // 把方括号内的标签加入（去重）
+            extraTags.forEach((et) => { if (!tagNames.includes(et)) tagNames.push(et); });
             if (currentCategory && !tagNames.includes(currentCategory)) {
               tagNames.push(currentCategory);
             }
@@ -449,12 +514,13 @@ const HomeView = {
     const tagCloudData = ref([]);
     const tagCloudLoading = ref(false);
     // 缩放/平移状态
+    const tagCloudContainerRef = ref(null);
     const tagCloudView = reactive({ scale: 1, tx: 0, ty: 0 });
     const tagCloudCanvasStyle = computed(() => ({
       transform: `translate(${tagCloudView.tx}px, ${tagCloudView.ty}px) scale(${tagCloudView.scale})`,
       transformOrigin: '0 0',
-      width: '500px',
-      height: '300px',
+      width: '100%',
+      height: '100%',
       position: 'relative',
     }));
     const onTagCloudWheel = (e) => {
@@ -473,15 +539,33 @@ const HomeView = {
       tagCloudView.ty = my - (my - tagCloudView.ty) * realFactor;
       tagCloudView.scale = newScale;
     };
+    // 单个标签拖拽偏移量 { [tagId]: { dx, dy } }
+    const tagItemOffsets = reactive({});
     let _dragState = null;
     const onTagCloudMouseDown = (e) => {
-      // 仅响应鼠标左键，且不是点击在标签上
+      // 仅响应鼠标左键
       if (e.button !== 0) return;
       _dragState = {
+        type: 'canvas', // 默认拖拽画布
         startX: e.clientX,
         startY: e.clientY,
         origTx: tagCloudView.tx,
         origTy: tagCloudView.ty,
+        moved: false,
+      };
+    };
+    const onTagItemMouseDown = (t, e) => {
+      // 单个标签的拖拽
+      if (e.button !== 0) return;
+      e.stopPropagation(); // 阻止冒泡到画布拖拽
+      const offset = tagItemOffsets[t.id] || { dx: 0, dy: 0 };
+      _dragState = {
+        type: 'item',
+        tagId: t.id,
+        startX: e.clientX,
+        startY: e.clientY,
+        origDx: offset.dx,
+        origDy: offset.dy,
         moved: false,
       };
     };
@@ -490,8 +574,17 @@ const HomeView = {
       const dx = e.clientX - _dragState.startX;
       const dy = e.clientY - _dragState.startY;
       if (Math.abs(dx) + Math.abs(dy) > 3) _dragState.moved = true;
-      tagCloudView.tx = _dragState.origTx + dx;
-      tagCloudView.ty = _dragState.origTy + dy;
+      if (_dragState.type === 'canvas') {
+        tagCloudView.tx = _dragState.origTx + dx;
+        tagCloudView.ty = _dragState.origTy + dy;
+      } else if (_dragState.type === 'item') {
+        // 单个标签拖动：需要除以缩放比例，使拖动距离与视觉一致
+        const scale = tagCloudView.scale || 1;
+        tagItemOffsets[_dragState.tagId] = {
+          dx: _dragState.origDx + dx / scale,
+          dy: _dragState.origDy + dy / scale,
+        };
+      }
     };
     const onTagCloudMouseUp = () => { _dragState = null; };
     const onTagCloudItemClick = (t, e) => {
@@ -499,10 +592,24 @@ const HomeView = {
       if (_dragState && _dragState.moved) return;
       filterByTag(t);
     };
+    const centerTagCloud = () => {
+      // 将 500x300 画布中心对齐到容器中心
+      const el = tagCloudContainerRef.value;
+      if (!el) {
+        tagCloudView.tx = 0;
+        tagCloudView.ty = 0;
+        return;
+      }
+      const cw = el.clientWidth;
+      const ch = el.clientHeight;
+      // 画布内容区域固定为 500x300
+      tagCloudView.tx = (cw - 500) / 2;
+      tagCloudView.ty = (ch - 300) / 2;
+    };
     const resetTagCloudView = () => {
       tagCloudView.scale = 1;
-      tagCloudView.tx = 0;
-      tagCloudView.ty = 0;
+      Object.keys(tagItemOffsets).forEach(k => delete tagItemOffsets[k]);
+      centerTagCloud();
     };
     const loadTagCloud = async () => {
       tagCloudLoading.value = true;
@@ -510,20 +617,22 @@ const HomeView = {
         const { data } = await http.get("/api/tags/stats");
         if (data.code === 0) {
           tagCloudData.value = data.data.filter((t) => t.count > 0);
+          // 数据加载后下一帧居中
+          Vue.nextTick(() => centerTagCloud());
         }
       } finally {
         tagCloudLoading.value = false;
       }
     };
-    // 计算标签云位置（云朵形状分布）
+    // 计算标签云位置（云朵形状分布，保证不重叠，标签过多时自动缩小）
     const tagCloudPositions = computed(() => {
       const data = tagCloudData.value;
       if (!data.length) return [];
       const counts = data.map((t) => t.count);
       const max = Math.max(...counts);
       const min = Math.min(...counts);
-      const minSize = 13;
-      const maxSize = 34;
+      const baseMinSize = 13;
+      const baseMaxSize = 34;
 
       // 使用固定种子的伪随机，让每次渲染结果一致
       const seededRandom = (seed) => {
@@ -548,93 +657,181 @@ const HomeView = {
         return false;
       };
 
-      const positions = [];
-      const placed = []; // 已放置的标签 {x, y, w, h}
-
-      for (let i = 0; i < data.length; i++) {
-        const tag = data[i];
-        let size;
-        if (max === min) {
-          size = 18;
-        } else {
-          size = minSize + ((tag.count - min) / (max - min)) * (maxSize - minSize);
+      // 碰撞检测辅助函数
+      const hasOverlap = (px, py, w, h, placed, gap) => {
+        for (const p of placed) {
+          if (px < p.x + p.w + gap && px + w + gap > p.x &&
+              py < p.y + p.h + gap && py + h + gap > p.y) {
+            return true;
+          }
         }
-        size = Math.round(size);
+        return false;
+      };
 
-        // 估算标签宽高（字符数 * 字号）
-        const estW = tag.name.length * size * 0.7 + 16;
-        const estH = size * 1.5 + 8;
+      // 尝试以指定缩放比例布局所有标签，返回 null 表示布局失败
+      const tryLayout = (scaleFactor) => {
+        const minSize = baseMinSize * scaleFactor;
+        const maxSize = baseMaxSize * scaleFactor;
+        const positions = [];
+        const placed = []; // 已放置的标签 {x, y, w, h}
+        const gap = Math.max(2, 4 * scaleFactor); // 标签间隙随比例缩小
 
-        // 在云朵区域内螺旋搜索放置位置
-        let bestX = 0, bestY = 0, found = false;
-        for (let attempt = 0; attempt < 200; attempt++) {
-          // 螺旋 + 随机
-          const angle = attempt * 0.618 * Math.PI * 2;
-          const radius = 0.05 + attempt * 0.005;
-          const jitterX = (seededRandom(i * 1000 + attempt * 7) - 0.5) * 0.15;
-          const jitterY = (seededRandom(i * 2000 + attempt * 13) - 0.5) * 0.12;
-          const nx = Math.cos(angle) * radius + jitterX;
-          const ny = Math.sin(angle) * radius + jitterY;
+        for (let i = 0; i < data.length; i++) {
+          const tag = data[i];
+          let size;
+          if (max === min) {
+            size = 18 * scaleFactor;
+          } else {
+            size = minSize + ((tag.count - min) / (max - min)) * (maxSize - minSize);
+          }
+          size = Math.round(size);
 
-          if (!isInCloud(nx, ny)) continue;
+          // 估算标签宽高（字符数 * 字号）
+          const estW = tag.name.length * size * 0.7 + 16 * scaleFactor;
+          const estH = size * 1.5 + 8 * scaleFactor;
 
-          // 转换为像素坐标 (容器 500x300)
-          const px = 250 + nx * 220 - estW / 2;
-          const py = 150 + ny * 130 - estH / 2;
+          // 在云朵区域内螺旋搜索放置位置，扩大搜索范围
+          let bestX = 0, bestY = 0, found = false;
+          const maxAttempts = 400;
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            // 螺旋 + 随机
+            const angle = attempt * 0.618 * Math.PI * 2;
+            const radius = 0.03 + attempt * 0.004;
+            const jitterX = (seededRandom(i * 1000 + attempt * 7) - 0.5) * 0.12;
+            const jitterY = (seededRandom(i * 2000 + attempt * 13) - 0.5) * 0.1;
+            const nx = Math.cos(angle) * radius + jitterX;
+            const ny = Math.sin(angle) * radius + jitterY;
 
-          // 检查是否与已放置标签重叠
-          let overlap = false;
-          for (const p of placed) {
-            if (px < p.x + p.w + 4 && px + estW + 4 > p.x &&
-                py < p.y + p.h + 2 && py + estH + 2 > p.y) {
-              overlap = true;
+            if (!isInCloud(nx, ny)) continue;
+
+            // 转换为像素坐标 (容器 500x300)
+            const px = 250 + nx * 220 - estW / 2;
+            const py = 150 + ny * 130 - estH / 2;
+
+            // 确保在画布范围内
+            if (px < 0 || px + estW > 500 || py < 0 || py + estH > 300) continue;
+
+            // 检查是否与已放置标签重叠
+            if (!hasOverlap(px, py, estW, estH, placed, gap)) {
+              bestX = px;
+              bestY = py;
+              found = true;
               break;
             }
           }
-          if (!overlap) {
-            bestX = px;
-            bestY = py;
-            found = true;
-            break;
+
+          if (!found) {
+            // 当前比例放不下，返回 null 触发缩小
+            return null;
           }
+
+          placed.push({ x: bestX, y: bestY, w: estW, h: estH });
+
+          // 颜色策略：基于标签 id（或索引）使用黄金角分布生成色相
+          const hue = ((tag.id || (i + 1)) * 137.508) % 360;
+          const ratio = max === min ? 0.5 : (tag.count - min) / (max - min);
+          const saturation = Math.round(55 + ratio * 30);
+          const lightness = Math.round(55 - ratio * 22);
+          const color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+
+          // 加入手动拖拽偏移
+          const offset = tagItemOffsets[tag.id] || { dx: 0, dy: 0 };
+          positions.push({
+            ...tag,
+            style: {
+              position: 'absolute',
+              left: (bestX + offset.dx) + 'px',
+              top: (bestY + offset.dy) + 'px',
+              fontSize: size + 'px',
+              color: color,
+              cursor: 'grab',
+              padding: (3 * scaleFactor) + 'px ' + (6 * scaleFactor) + 'px',
+              lineHeight: '1.4',
+              whiteSpace: 'nowrap',
+              fontWeight: ratio > 0.6 ? '700' : (ratio > 0.3 ? '600' : '500'),
+              borderRadius: '4px',
+              transition: 'background 0.2s ease, text-shadow 0.2s ease',
+              userSelect: 'none',
+            },
+          });
         }
+        return positions;
+      };
 
-        if (!found) {
-          // 如果未找到合适位置，随机放在边缘
-          bestX = 250 + (seededRandom(i * 3000) - 0.5) * 350;
-          bestY = 150 + (seededRandom(i * 4000) - 0.5) * 200;
-        }
-
-        placed.push({ x: bestX, y: bestY, w: estW, h: estH });
-
-        // 颜色策略：基于标签 id（或索引）使用黄金角分布生成色相，保证颜色丰富且区分度高
-        // 权重越大（count 越多）的标签：饱和度更高、亮度更低（更深更浓）
-        const hue = ((tag.id || (i + 1)) * 137.508) % 360; // 黄金角 137.508°
-        const ratio = max === min ? 0.5 : (tag.count - min) / (max - min);
-        const saturation = Math.round(55 + ratio * 30); // 55% ~ 85%
-        const lightness = Math.round(55 - ratio * 22);  // 55% ~ 33%
-        const color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-
-        positions.push({
-          ...tag,
-          style: {
-            position: 'absolute',
-            left: bestX + 'px',
-            top: bestY + 'px',
-            fontSize: size + 'px',
-            color: color,
-            cursor: 'pointer',
-            padding: '3px 6px',
-            lineHeight: '1.4',
-            whiteSpace: 'nowrap',
-            fontWeight: ratio > 0.6 ? '700' : (ratio > 0.3 ? '600' : '500'),
-            borderRadius: '4px',
-            transition: 'background 0.2s ease, text-shadow 0.2s ease',
-            userSelect: 'none',
-          },
-        });
+      // 逐步缩小比例直到所有标签都能不重叠放置
+      let scale = 1.0;
+      const minScale = 0.4; // 最小缩放到 40%
+      const scaleStep = 0.1;
+      let result = null;
+      while (scale >= minScale) {
+        result = tryLayout(scale);
+        if (result) break;
+        scale -= scaleStep;
       }
-      return positions;
+
+      // 如果即使最小比例也放不下（极端情况），用最小比例强制布局，允许溢出但不重叠
+      if (!result) {
+        // 最后兜底：用最小比例，放不下的就不显示
+        const finalScale = minScale;
+        const minSize = baseMinSize * finalScale;
+        const maxSize = baseMaxSize * finalScale;
+        const positions = [];
+        const placed = [];
+        const gap = 2;
+        for (let i = 0; i < data.length; i++) {
+          const tag = data[i];
+          let size = max === min ? 18 * finalScale : minSize + ((tag.count - min) / (max - min)) * (maxSize - minSize);
+          size = Math.round(size);
+          const estW = tag.name.length * size * 0.7 + 16 * finalScale;
+          const estH = size * 1.5 + 8 * finalScale;
+
+          let bestX = 0, bestY = 0, found = false;
+          for (let attempt = 0; attempt < 600; attempt++) {
+            const angle = attempt * 0.618 * Math.PI * 2;
+            const radius = 0.03 + attempt * 0.003;
+            const jitterX = (seededRandom(i * 1000 + attempt * 7) - 0.5) * 0.1;
+            const jitterY = (seededRandom(i * 2000 + attempt * 13) - 0.5) * 0.08;
+            const nx = Math.cos(angle) * radius + jitterX;
+            const ny = Math.sin(angle) * radius + jitterY;
+            if (!isInCloud(nx, ny)) continue;
+            const px = 250 + nx * 220 - estW / 2;
+            const py = 150 + ny * 130 - estH / 2;
+            if (!hasOverlap(px, py, estW, estH, placed, gap)) {
+              bestX = px; bestY = py; found = true; break;
+            }
+          }
+          if (!found) continue; // 实在放不下则跳过不显示
+
+          placed.push({ x: bestX, y: bestY, w: estW, h: estH });
+          const hue = ((tag.id || (i + 1)) * 137.508) % 360;
+          const ratio = max === min ? 0.5 : (tag.count - min) / (max - min);
+          const saturation = Math.round(55 + ratio * 30);
+          const lightness = Math.round(55 - ratio * 22);
+          const color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+          const offset = tagItemOffsets[tag.id] || { dx: 0, dy: 0 };
+          positions.push({
+            ...tag,
+            style: {
+              position: 'absolute',
+              left: (bestX + offset.dx) + 'px',
+              top: (bestY + offset.dy) + 'px',
+              fontSize: size + 'px',
+              color: color,
+              cursor: 'grab',
+              padding: (3 * finalScale) + 'px ' + (6 * finalScale) + 'px',
+              lineHeight: '1.4',
+              whiteSpace: 'nowrap',
+              fontWeight: ratio > 0.6 ? '700' : (ratio > 0.3 ? '600' : '500'),
+              borderRadius: '4px',
+              transition: 'background 0.2s ease, text-shadow 0.2s ease',
+              userSelect: 'none',
+            },
+          });
+        }
+        result = positions;
+      }
+
+      return result;
     });
 
     // ----- 文件列表 -----
@@ -685,9 +882,29 @@ const HomeView = {
       fileQuery.tagIds = [];
       fileQuery.mode = "all";
       filePagination.page = 1;
+      // 同步清空左侧树的勾选
+      treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
+      selectedTags.value = [];
+      loadFiles();
+    };
+    // 文件列表标签下拉变化时同步左侧树勾选并刷新
+    const onFileQueryTagChange = (ids) => {
+      // 先清空左侧树勾选
+      treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
+      // 逐个勾选
+      ids.forEach((id) => treeRef.value?.setChecked(id, true, false));
+      selectedTags.value = ids.map((id) => {
+        const t = tags.value.find((x) => x.id === id);
+        return { id, name: t ? t.name : String(id) };
+      });
+      filePagination.page = 1;
       loadFiles();
     };
     const filterByTag = (tag) => {
+      // 清空之前的勾选，然后只勾选该标签
+      treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
+      selectedTags.value = [{ id: tag.id, name: tag.name }];
+      treeRef.value?.setChecked(tag.id, true, false);
       fileQuery.tagIds = [tag.id];
       fileQuery.mode = "all";
       filePagination.page = 1;
@@ -813,6 +1030,7 @@ const HomeView = {
       editDialog.id = null;
       editDialog.name = "";
       editDialog.parentId = parentId;
+      editDialog.priority = 0;
       editDialog.title = parentId ? "新增子 Tag" : "新增 Tag";
       editDialog.visible = true;
     };
@@ -822,6 +1040,7 @@ const HomeView = {
       editDialog.id = node.id;
       editDialog.name = node.name;
       editDialog.parentId = node.parentId;
+      editDialog.priority = node.priority || 0;
       editDialog.title = "编辑 Tag";
       editDialog.visible = true;
     };
@@ -832,7 +1051,7 @@ const HomeView = {
         ElMessage.warning("名称不能为空");
         return;
       }
-      const payload = { name, parentId: editDialog.parentId || null };
+      const payload = { name, parentId: editDialog.parentId || null, priority: editDialog.priority || 0 };
       if (editDialog.mode === "create") {
         const { data } = await http.post("/api/tags", payload);
         if (data.code === 0) {
@@ -861,7 +1080,72 @@ const HomeView = {
       const { data } = await http.delete(`/api/tags/${node.id}`);
       if (data.code === 0) {
         ElMessage.success("已删除");
+        // 收集被删除的 tag id（包括其所有子孙）
+        const removedIds = new Set();
+        const collect = (t) => { removedIds.add(t.id); if (t.children) t.children.forEach(collect); };
+        collect(node);
+        // 从已选标签中移除被删除的标签
+        selectedTags.value = selectedTags.value.filter((t) => !removedIds.has(t.id));
+        // 同步文件列表筛选条件
+        fileQuery.tagIds = selectedTags.value.map((t) => t.id);
         await loadTags();
+        loadFiles();
+      }
+    };
+
+    // ----- 批量移动标签 -----
+    const batchMoveDialog = reactive({
+      visible: false,
+      targetParentId: null,
+      loading: false,
+    });
+    const openBatchMove = () => {
+      // 获取左侧树中勾选的标签（用于文件名生成器的那些勾选）
+      const checkedNodes = treeRef.value?.getCheckedKeys() || [];
+      if (!checkedNodes.length) {
+        ElMessage.warning("请先在左侧标签树中勾选要移动的标签");
+        return;
+      }
+      batchMoveDialog.targetParentId = null;
+      batchMoveDialog.visible = true;
+    };
+    // 批量移动可选的目标父级（排除已勾选的标签）
+    const batchMoveParentOptions = computed(() => {
+      const checked = new Set(treeRef.value?.getCheckedKeys() || []);
+      const all = buildTree(tags.value);
+      const prune = (nodes) => {
+        const result = [];
+        for (const node of nodes) {
+          if (checked.has(node.id)) continue;
+          const copy = { ...node };
+          if (copy.children) copy.children = prune(copy.children);
+          result.push(copy);
+        }
+        return result;
+      };
+      return prune(all);
+    });
+    const submitBatchMove = async () => {
+      const ids = treeRef.value?.getCheckedKeys() || [];
+      if (!ids.length) {
+        ElMessage.warning("没有选中的标签");
+        return;
+      }
+      batchMoveDialog.loading = true;
+      try {
+        const { data } = await http.post("/api/tags/batch-move", {
+          ids,
+          targetParentId: batchMoveDialog.targetParentId || null,
+        });
+        if (data.code === 0) {
+          ElMessage.success(data.msg || "移动成功");
+          batchMoveDialog.visible = false;
+          // 清空选中状态
+          selectedTags.value = [];
+          await loadTags();
+        }
+      } finally {
+        batchMoveDialog.loading = false;
       }
     };
 
@@ -919,6 +1203,8 @@ const HomeView = {
     // 树过滤 — 模糊子序列匹配（忽略大小写，支持分散字符）
     const filterNode = (value, data) => {
       if (!value) return true;
+      // 虚拟根节点始终显示
+      if (data._virtual) return true;
       const query = value.toLowerCase();
       const target = data.name.toLowerCase();
       // 先尝试 includes 快速路径
@@ -955,6 +1241,10 @@ const HomeView = {
       openEdit,
       submitEdit,
       removeTag,
+      batchMoveDialog,
+      openBatchMove,
+      batchMoveParentOptions,
+      submitBatchMove,
       openPwd,
       submitPwd,
       openImport,
@@ -972,6 +1262,7 @@ const HomeView = {
       removeSelected,
       moveSelected,
       clearSelected,
+
       onDragStart,
       onDragOver,
       onDrop,
@@ -980,13 +1271,16 @@ const HomeView = {
       tagCloudData,
       tagCloudLoading,
       tagCloudPositions,
+      tagCloudContainerRef,
       tagCloudView,
       tagCloudCanvasStyle,
+      tagItemOffsets,
       onTagCloudWheel,
       onTagCloudMouseDown,
       onTagCloudMouseMove,
       onTagCloudMouseUp,
       onTagCloudItemClick,
+      onTagItemMouseDown,
       resetTagCloudView,
       // 保存与文件列表
       saveLoading,
@@ -1009,6 +1303,10 @@ const HomeView = {
       onPageSizeChange,
       resetFileQuery,
       filterByTag,
+      onFileQueryTagChange,
+      tagTreeNoVirtual,
+      genTagPickIds,
+      onGenTagPick,
       selectedFiles,
       onSelectionChange,
       batchDeleteFiles,
@@ -1046,8 +1344,9 @@ const HomeView = {
 
         <div class="split">
           <div class="tree-card">
-            <div style="margin-bottom:10px;">
+            <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <el-button size="small" type="primary" plain @click="openCreate(null)">+ 新建顶级 Tag</el-button>
+              <el-button size="small" type="warning" plain @click="openBatchMove">📦 批量移动</el-button>
             </div>
             <div v-if="!tags.length" class="empty-tip">暂无 Tag，点击上方按钮创建第一个吧</div>
             <el-tree
@@ -1057,7 +1356,6 @@ const HomeView = {
               node-key="id"
               default-expand-all
               show-checkbox
-              check-strictly
               :default-checked-keys="checkedKeys"
               :expand-on-click-node="false"
               :filter-node-method="filterNode"
@@ -1065,22 +1363,30 @@ const HomeView = {
             >
               <template #default="{ node, data }">
                 <div class="tag-node">
-                  <span class="actions">
-                    <button
-                      class="icon-btn icon-add"
-                      title="新增子级"
-                      @click.stop="openCreate(data.id)"
-                    >+</button>
-                    <button
-                      class="icon-btn icon-del"
-                      title="删除"
-                      @click.stop="removeTag(data)"
-                    >×</button>
-                  </span>
-                  <span class="name name-clickable" @click.stop="openEdit(data)" :title="'点击编辑：' + data.name">
-                    {{ data.name }}
-                    <span class="tag-meta">#{{ data.id }}</span>
-                  </span>
+                  <template v-if="data._virtual">
+                    <span class="name" style="font-weight:600;color:#409eff;">
+                      {{ data.name }}<span class="tag-child-count">({{ data.childCount }})</span>
+                    </span>
+                  </template>
+                  <template v-else>
+                    <span class="actions">
+                      <button
+                        class="icon-btn icon-add"
+                        title="新增子级"
+                        @click.stop="openCreate(data.id)"
+                      >+</button>
+                      <button
+                        class="icon-btn icon-del"
+                        title="删除"
+                        @click.stop="removeTag(data)"
+                      >×</button>
+                    </span>
+                    <span class="name name-clickable" @click.stop="openEdit(data)" :title="'点击编辑：' + data.name">
+                      {{ data.name }}<span v-if="data.childCount > 0" class="tag-child-count">({{ data.childCount }})</span>
+                      <span class="tag-meta">#{{ data.id }}</span>
+                      <span v-if="data.priority > 0" class="tag-priority-badge" :title="'优先级: ' + data.priority">⬆{{ data.priority }}</span>
+                    </span>
+                  </template>
                 </div>
               </template>
             </el-tree>
@@ -1099,7 +1405,22 @@ const HomeView = {
             <div class="gen-row">
               <span class="gen-label">已选标签</span>
               <div style="flex:1;">
-                <div v-if="!selectedTags.length" class="empty-sub">在左侧勾选标签，可拖拽排序</div>
+                <el-tree-select
+                  v-model="genTagPickIds"
+                  :data="tagTreeNoVirtual"
+                  :props="{ value: 'id', label: 'name', children: 'children' }"
+                  node-key="id"
+                  multiple
+                  check-strictly
+                  filterable
+                  clearable
+                  collapse-tags
+                  collapse-tags-tooltip
+                  placeholder="搜索并选择标签"
+                  style="width:100%;margin-bottom:8px;"
+                  @change="onGenTagPick"
+                />
+                <div v-if="!selectedTags.length" class="empty-sub">在左侧勾选标签或上方搜索选择，可拖拽排序</div>
                 <div v-else class="picked-list">
                   <div
                     v-for="(t, idx) in selectedTags"
@@ -1147,6 +1468,7 @@ const HomeView = {
               <div v-if="!tagCloudData.length" style="color:#c0c4cc;font-size:13px;text-align:center;padding:20px 0;">暂无标签使用数据</div>
               <div
                 v-else
+                ref="tagCloudContainerRef"
                 class="tag-cloud-container"
                 @wheel.prevent="onTagCloudWheel"
                 @mousedown="onTagCloudMouseDown"
@@ -1159,6 +1481,7 @@ const HomeView = {
                     <span
                       :style="t.style"
                       class="tag-cloud-item"
+                      @mousedown="onTagItemMouseDown(t, $event)"
                       @click="onTagCloudItemClick(t, $event)"
                     >{{ t.name }}</span>
                   </el-tooltip>
@@ -1183,26 +1506,28 @@ const HomeView = {
               v-model="fileQuery.keyword"
               placeholder="按文件名模糊搜索"
               clearable
-              style="width:240px"
+              style="width:220px"
               @keyup.enter="loadFiles"
               @clear="loadFiles"
             />
             <el-tree-select
               v-model="fileQuery.tagIds"
-              :data="tagTree"
+              :data="tagTreeNoVirtual"
               :props="{ value: 'id', label: 'name', children: 'children' }"
               node-key="id"
               multiple
+              check-strictly
+              filterable
+              clearable
               collapse-tags
               collapse-tags-tooltip
-              check-strictly
-              clearable
-              placeholder="按标签筛选（可多选）"
-              style="width:340px"
+              placeholder="按标签筛选"
+              style="width:260px"
+              @change="onFileQueryTagChange"
             />
-            <el-radio-group v-model="fileQuery.mode" size="small">
-              <el-radio-button label="all">同时包含 (AND)</el-radio-button>
-              <el-radio-button label="any">任一包含 (OR)</el-radio-button>
+            <el-radio-group v-model="fileQuery.mode" size="small" @change="loadFiles">
+              <el-radio-button label="all">AND</el-radio-button>
+              <el-radio-button label="any">OR</el-radio-button>
             </el-radio-group>
             <el-button type="primary" @click="loadFiles">查询</el-button>
             <el-button @click="resetFileQuery">重置</el-button>
@@ -1408,10 +1733,39 @@ const HomeView = {
               style="width:100%"
             />
           </el-form-item>
+          <el-form-item label="优先级">
+            <el-input-number v-model="editDialog.priority" :min="0" :max="999" :step="1" controls-position="right" style="width:160px" />
+            <span style="margin-left:8px;color:#909399;font-size:12px">数字越大，导出时排越前</span>
+          </el-form-item>
         </el-form>
         <template #footer>
           <el-button @click="editDialog.visible=false">取消</el-button>
           <el-button type="primary" @click="submitEdit">确定</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 批量移动 Tag -->
+      <el-dialog v-model="batchMoveDialog.visible" title="批量移动标签" width="420px">
+        <p style="color:#606266;font-size:13px;margin-bottom:12px;">
+          将左侧树中勾选的标签移动到指定的父标签下（不选则移动到顶级）。
+        </p>
+        <el-form label-width="80px">
+          <el-form-item label="目标父级">
+            <el-tree-select
+              v-model="batchMoveDialog.targetParentId"
+              :data="batchMoveParentOptions"
+              :props="{ value: 'id', label: 'name', children: 'children' }"
+              node-key="id"
+              check-strictly
+              clearable
+              placeholder="不选则移动到顶级"
+              style="width:100%"
+            />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="batchMoveDialog.visible=false">取消</el-button>
+          <el-button type="primary" :loading="batchMoveDialog.loading" @click="submitBatchMove">确定移动</el-button>
         </template>
       </el-dialog>
 
@@ -1504,10 +1858,11 @@ function buildTree(flat) {
       roots.push(node);
     }
   });
-  // 清理空 children，element-plus 树要求 children 是数组或不存在
+  // 计算子标签个数并清理空 children
   const trim = (nodes) =>
     nodes.map((n) => {
       const o = { ...n };
+      o.childCount = o.children.length;
       if (o.children.length) o.children = trim(o.children);
       else delete o.children;
       return o;
