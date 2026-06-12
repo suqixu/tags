@@ -1,0 +1,320 @@
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC",
+    "Microsoft YaHei", Arial, sans-serif;
+  background: #f5f7fa;
+  color: #2c3e50;
+}
+
+/* 登录 */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+.login-card {
+  width: 380px;
+  padding: 36px 32px 28px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.login-title {
+  text-align: center;
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.login-sub {
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+/* 主页面布局 */
+.layout {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.topbar {
+  height: 56px;
+  background: #fff;
+  border-bottom: 1px solid #ebeef5;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  justify-content: space-between;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+.topbar .title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.topbar .right { display: flex; align-items: center; gap: 12px; }
+
+.main {
+  flex: 1;
+  padding: 24px;
+  overflow: auto;
+}
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.tree-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  min-height: 60vh;
+}
+.empty-tip {
+  color: #909399;
+  text-align: center;
+  padding: 60px 0;
+}
+.tag-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding-right: 8px;
+}
+.tag-node .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-node .name-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 4px;
+  transition: background 0.15s;
+}
+.tag-node .name-clickable:hover {
+  background: #ecf5ff;
+  color: #409eff;
+}
+.tag-node .actions {
+  display: inline-flex;
+  gap: 0;
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+.el-tree-node__content:hover .tag-node .actions { opacity: 1; }
+.tag-meta {
+  font-size: 12px;
+  color: #b1b3b8;
+  margin-left: 6px;
+}
+.icon-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-weight: 600;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.icon-btn.icon-add {
+  color: #67c23a;
+}
+.icon-btn.icon-add:hover {
+  background: #67c23a;
+  color: #fff;
+  border-color: #67c23a;
+}
+.icon-btn.icon-del {
+  color: #f56c6c;
+  font-size: 15px;
+}
+.icon-btn.icon-del:hover {
+  background: #f56c6c;
+  color: #fff;
+  border-color: #f56c6c;
+}
+
+/* 两栏布局 */
+.split {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.split .tree-card { width: 360px; flex-shrink: 0; min-width: 0; min-height: 60vh; }
+.split .gen-card {
+  flex: 1;
+  min-width: 0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.gen-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.gen-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.gen-label {
+  width: 70px;
+  flex-shrink: 0;
+  color: #606266;
+  font-size: 13px;
+  line-height: 32px;
+}
+.gen-tip {
+  color: #909399;
+  font-size: 12px;
+  margin-top: 4px;
+  line-height: 1.6;
+}
+.gen-tip code {
+  background: #f5f7fa;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.empty-sub {
+  color: #c0c4cc;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.picked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px dashed #e4e7ed;
+  border-radius: 6px;
+  padding: 6px;
+  background: #fafbfc;
+}
+.picked-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: grab;
+  user-select: none;
+}
+.picked-item:active { cursor: grabbing; }
+.picked-item:hover { border-color: #c6e2ff; background: #f0f9ff; }
+.picked-idx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #409eff;
+  color: #fff;
+  font-size: 12px;
+}
+.picked-name {
+  flex: 1;
+  font-size: 14px;
+  color: #2c3e50;
+}
+.final-input :deep(.el-input__inner),
+.final-input .el-input__inner {
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  background: #f5f7fa;
+}
+
+/* 标签云 */
+.tag-cloud-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px dashed #e4e7ed;
+}
+.tag-cloud-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: #303133;
+}
+.tag-cloud-container {
+  position: relative;
+  width: 100%;
+  max-width: 500px;
+  height: 300px;
+  margin: 0 auto;
+  overflow: hidden;
+}
+.tag-cloud-item {
+  border-radius: 4px;
+  transition: all 0.25s ease;
+  font-weight: 500;
+  white-space: nowrap;
+  user-select: none;
+}
+.tag-cloud-item:hover {
+  background: rgba(64, 158, 255, 0.12);
+  transform: scale(1.18);
+  text-shadow: 0 0 8px rgba(64, 158, 255, 0.4);
+  z-index: 10;
+}
+
+
+/* 文件列表 */
+.files-card {
+  margin-top: 16px;
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.files-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.files-count {
+  color: #909399;
+  font-size: 13px;
+  font-weight: normal;
+  margin-left: 8px;
+}
+.files-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.files-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+@media (max-width: 1100px) {
+  .split { flex-direction: column; }
+  .split .tree-card { width: 100%; }
+  .split .gen-card { width: 100%; position: static; }
+}
