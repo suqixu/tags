@@ -1760,7 +1760,7 @@ const HomeView = {
   template: `
     <div class="layout">
       <div class="topbar">
-        <div class="title">🏷️ Tag 管理系统 <span class="version-badge">v1.6.0</span></div>
+        <div class="title">🏷️ Tag 管理系统 <span class="version-badge">v1.7.0</span></div>
         <div class="right">
           <el-popover placement="bottom-start" :width="360" trigger="click">
             <template #reference>
@@ -1768,6 +1768,14 @@ const HomeView = {
             </template>
             <div class="changelog">
               <h4 style="margin:0 0 10px;">功能更新说明</h4>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.7.0 <span class="changelog-date">2025-06-13</span></div>
+                <ul>
+                  <li>文件列表支持按文件名/日期/时间排序（后端排序）</li>
+                  <li>搜索关键词高亮、选中标签高亮</li>
+                  <li>标签树展开状态持久化，搜索父级时显示子级</li>
+                </ul>
+              </div>
               <div class="changelog-item">
                 <div class="changelog-version">v1.6.0 <span class="changelog-date">2025-06-13</span></div>
                 <ul>
