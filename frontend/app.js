@@ -1681,7 +1681,7 @@ const HomeView = {
   template: `
     <div class="layout">
       <div class="topbar">
-        <div class="title">🏷️ Tag 管理系统 <span class="version-badge">v1.5.0</span></div>
+        <div class="title">🏷️ Tag 管理系统 <span class="version-badge">v1.6.0</span></div>
         <div class="right">
           <el-popover placement="bottom-start" :width="360" trigger="click">
             <template #reference>
@@ -1689,6 +1689,13 @@ const HomeView = {
             </template>
             <div class="changelog">
               <h4 style="margin:0 0 10px;">功能更新说明</h4>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.6.0 <span class="changelog-date">2025-06-13</span></div>
+                <ul>
+                  <li>文件名生成器、标签云、文件列表、文件统计卡片支持折叠/展开</li>
+                  <li>可搜索标签选择器，标签模糊搜索优化</li>
+                </ul>
+              </div>
               <div class="changelog-item">
                 <div class="changelog-version">v1.5.0 <span class="changelog-date">2025-06-13</span></div>
                 <ul>
