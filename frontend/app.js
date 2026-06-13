@@ -84,6 +84,28 @@ const HomeView = {
     const treeRef = ref(null);
     const filterText = ref("");
     const treeCollapsed = ref(false);
+
+    // 树节点展开状态持久化
+    const TREE_EXPAND_KEY = "tag_tree_expanded_keys";
+    const savedExpandedKeys = localStorage.getItem(TREE_EXPAND_KEY);
+    const treeExpandedKeys = ref(savedExpandedKeys ? JSON.parse(savedExpandedKeys) : null);
+    // null 表示首次使用，需要展开全部
+
+    const saveExpandedKeys = () => {
+      localStorage.setItem(TREE_EXPAND_KEY, JSON.stringify(treeExpandedKeys.value));
+    };
+    const onTreeNodeExpand = (nodeData) => {
+      if (!treeExpandedKeys.value) treeExpandedKeys.value = [];
+      if (!treeExpandedKeys.value.includes(nodeData.id)) {
+        treeExpandedKeys.value.push(nodeData.id);
+      }
+      saveExpandedKeys();
+    };
+    const onTreeNodeCollapse = (nodeData) => {
+      if (!treeExpandedKeys.value) treeExpandedKeys.value = [];
+      treeExpandedKeys.value = treeExpandedKeys.value.filter((k) => k !== nodeData.id);
+      saveExpandedKeys();
+    };
     const genCollapsed = ref(false);
     const tagCloudCollapsed = ref(false);
     const filesCollapsed = ref(false);
@@ -1285,6 +1307,12 @@ const HomeView = {
       const { data } = await http.get("/api/tags");
       if (data.code === 0) {
         tags.value = data.data;
+        // 首次加载（无保存记录）时展开所有有子节点的标签 + 虚拟根节点
+        if (treeExpandedKeys.value === null) {
+          const parentIds = new Set(data.data.filter((t) => t.parentId).map((t) => t.parentId));
+          treeExpandedKeys.value = [VIRTUAL_ALL_ID, ...parentIds];
+          saveExpandedKeys();
+        }
         // 清理已不存在的选中项（例如别处删除后）
         const validIds = new Set(data.data.map((t) => t.id));
         selectedTags.value = selectedTags.value.filter((t) => validIds.has(t.id));
@@ -1555,6 +1583,9 @@ const HomeView = {
       tags,
       tagTree,
       treeRef,
+      treeExpandedKeys,
+      onTreeNodeExpand,
+      onTreeNodeCollapse,
       filterText,
       editDialog,
       pwdDialog,
@@ -1784,7 +1815,7 @@ const HomeView = {
                 ref="treeRef"
                 :data="tagTree"
                 node-key="id"
-                default-expand-all
+                :default-expanded-keys="treeExpandedKeys || []"
                 show-checkbox
                 draggable
                 :default-checked-keys="checkedKeys"
@@ -1794,6 +1825,8 @@ const HomeView = {
                 :allow-drag="allowTreeDrag"
                 @check="onTreeCheck"
                 @node-drop="onTreeNodeDrop"
+                @node-expand="onTreeNodeExpand"
+                @node-collapse="onTreeNodeCollapse"
               >
                 <template #default="{ node, data }">
                   <div class="tag-node">
