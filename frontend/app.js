@@ -4,7 +4,7 @@ const { createApp, ref, reactive, computed, onMounted, h } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
 
 // API 基础地址：与后端同源时为空（由 Flask 静态托管），独立运行时可以改成 http://localhost:5050
-const API_BASE = (location.port === "5050" || location.protocol === "file:") ? "" : "http://localhost:5050";
+const API_BASE = (location.port === "5051" || location.protocol === "file:") ? "" : "http://localhost:5051";
 
 const http = axios.create({ baseURL: API_BASE, timeout: 10000 });
 http.interceptors.request.use((config) => {
@@ -83,6 +83,11 @@ const HomeView = {
     const tags = ref([]); // 平铺
     const treeRef = ref(null);
     const filterText = ref("");
+    const treeCollapsed = ref(false);
+    const genCollapsed = ref(false);
+    const tagCloudCollapsed = ref(false);
+    const filesCollapsed = ref(false);
+    const statsCollapsed = ref(false);
 
     // 树形结构（包含虚拟"全部标签"根节点，方便全选操作）
     const VIRTUAL_ALL_ID = "__all__";
@@ -204,21 +209,24 @@ const HomeView = {
     const onTreeCheck = (data, checked) => {
       // 获取实际勾选的 key，排除虚拟"全部标签"节点
       const realChecked = checked.checkedKeys.filter((k) => k !== VIRTUAL_ALL_ID);
-      // 根据 tags 平铺列表重建 selectedTags（保持已有顺序，追加新增的）
-      const checkedSet = new Set(realChecked);
-      // 保留已有且仍勾选的
-      const kept = selectedTags.value.filter((t) => checkedSet.has(t.id));
-      const keptIds = new Set(kept.map((t) => t.id));
-      // 追加新勾选的
-      const tagMap = new Map(tags.value.map((t) => [t.id, t]));
-      realChecked.forEach((id) => {
-        if (!keptIds.has(id) && tagMap.has(id)) {
-          kept.push({ id, name: tagMap.get(id).name });
-        }
-      });
-      selectedTags.value = kept;
-      // 同步标签筛选到文件列表并重新查询
-      fileQuery.tagIds = selectedTags.value.map((t) => t.id);
+      // 仅当文件名不为空时，才将标签填入文件名生成器的已选标签
+      if ((fileName.value || "").trim()) {
+        // 根据 tags 平铺列表重建 selectedTags（保持已有顺序，追加新增的）
+        const checkedSet = new Set(realChecked);
+        // 保留已有且仍勾选的
+        const kept = selectedTags.value.filter((t) => checkedSet.has(t.id));
+        const keptIds = new Set(kept.map((t) => t.id));
+        // 追加新勾选的
+        const tagMap = new Map(tags.value.map((t) => [t.id, t]));
+        realChecked.forEach((id) => {
+          if (!keptIds.has(id) && tagMap.has(id)) {
+            kept.push({ id, name: tagMap.get(id).name });
+          }
+        });
+        selectedTags.value = kept;
+      }
+      // 无论文件名是否为空，都同步标签筛选到文件列表并重新查询
+      fileQuery.tagIds = realChecked;
       filePagination.page = 1;
       loadFiles();
     };
@@ -616,7 +624,7 @@ const HomeView = {
       try {
         const { data } = await http.get("/api/tags/stats");
         if (data.code === 0) {
-          tagCloudData.value = data.data.filter((t) => t.count > 0);
+          tagCloudData.value = data.data.filter((t) => t.count > 1);
           // 数据加载后下一帧居中
           Vue.nextTick(() => centerTagCloud());
         }
@@ -834,12 +842,50 @@ const HomeView = {
       return result;
     });
 
+    // ----- 统计列表 -----
+    const statsData = ref([]);
+    const statsTotal = ref(0);
+    const statsLoading = ref(false);
+    const statsQuery = reactive({
+      groupBy: "tag", // tag | date
+      dateRange: null,
+      tagIds: [],
+    });
+    const loadStats = async () => {
+      statsLoading.value = true;
+      try {
+        const params = { groupBy: statsQuery.groupBy };
+        if (statsQuery.dateRange && statsQuery.dateRange.length === 2) {
+          const fmt = (d) => (typeof d === "string" ? d : (() => { const dt = new Date(d); return dt.getFullYear() + "-" + String(dt.getMonth()+1).padStart(2,"0") + "-" + String(dt.getDate()).padStart(2,"0"); })());
+          params.dateFrom = fmt(statsQuery.dateRange[0]);
+          params.dateTo = fmt(statsQuery.dateRange[1]);
+        }
+        if (statsQuery.tagIds.length) {
+          params.tagIds = statsQuery.tagIds.join(",");
+        }
+        const { data } = await http.get("/api/files/stats", { params });
+        if (data.code === 0) {
+          statsData.value = data.data;
+          statsTotal.value = data.total || 0;
+        }
+      } finally {
+        statsLoading.value = false;
+      }
+    };
+    const resetStats = () => {
+      statsQuery.groupBy = "tag";
+      statsQuery.dateRange = null;
+      statsQuery.tagIds = [];
+      loadStats();
+    };
+
     // ----- 文件列表 -----
     const fileList = ref([]);
     const fileQuery = reactive({
       keyword: "",
       tagIds: [],
       mode: "all", // all | any
+      dateRange: null, // [startDate, endDate]
     });
     const fileLoading = ref(false);
     const filePagination = reactive({
@@ -858,6 +904,16 @@ const HomeView = {
         if (fileQuery.tagIds.length) {
           params.tagIds = fileQuery.tagIds.join(",");
           params.mode = fileQuery.mode;
+        }
+        if (fileQuery.dateRange && fileQuery.dateRange.length === 2) {
+          // value-format="YYYY-MM-DD" 时返回字符串，否则返回 Date 对象
+          const fmt = (d) => {
+            if (typeof d === "string") return d;
+            const dt = new Date(d);
+            return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+          };
+          params.dateFrom = fmt(fileQuery.dateRange[0]);
+          params.dateTo = fmt(fileQuery.dateRange[1]);
         }
         const { data } = await http.get("/api/files", { params });
         if (data.code === 0) {
@@ -881,6 +937,7 @@ const HomeView = {
       fileQuery.keyword = "";
       fileQuery.tagIds = [];
       fileQuery.mode = "all";
+      fileQuery.dateRange = null;
       filePagination.page = 1;
       // 同步清空左侧树的勾选
       treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
@@ -910,10 +967,220 @@ const HomeView = {
       filePagination.page = 1;
       loadFiles();
     };
+    // 移除单个文件的某个标签
+    const removeFileTag = async (file, tag) => {
+      try {
+        const { data } = await http.post("/api/files/batch-remove-tags", {
+          fileIds: [file.id],
+          tagIds: [tag.id],
+        });
+        if (data.code === 0) {
+          // 从本地 row 中移除该标签，避免重新请求整个列表
+          const idx = file.tags.findIndex((t) => t.id === tag.id);
+          if (idx !== -1) file.tags.splice(idx, 1);
+          ElMessage.success(`已移除标签「${tag.name}」`);
+        }
+      } catch (e) { /* http拦截器已处理 */ }
+    };
+    // 行内添加标签
+    const inlineAddTagState = reactive({ fileId: null, tagIds: [] });
+    const showInlineAddTag = (file) => {
+      inlineAddTagState.fileId = file.id;
+      inlineAddTagState.tagIds = [];
+    };
+    const hideInlineAddTag = () => {
+      inlineAddTagState.fileId = null;
+      inlineAddTagState.tagIds = [];
+    };
+    const submitInlineAddTag = async (file) => {
+      if (!inlineAddTagState.tagIds.length) { hideInlineAddTag(); return; }
+      // 区分已有标签 ID（数字）和新建标签名（字符串）
+      const existingIds = [];
+      const newNames = [];
+      inlineAddTagState.tagIds.forEach((v) => {
+        if (typeof v === "number") {
+          existingIds.push(v);
+        } else {
+          // allow-create 产生的是字符串
+          newNames.push(String(v).trim());
+        }
+      });
+      try {
+        // 1. 先创建新标签
+        const createdIds = [];
+        for (const name of newNames) {
+          if (!name) continue;
+          const { data } = await http.post("/api/tags", { name });
+          if (data.code === 0 && data.data && data.data.id) {
+            createdIds.push(data.data.id);
+          }
+        }
+        // 合并所有需要添加的标签ID
+        const allTagIds = [...existingIds, ...createdIds];
+        if (!allTagIds.length) { hideInlineAddTag(); return; }
+        // 2. 为文件添加标签
+        const { data } = await http.post("/api/files/batch-add-tags", {
+          fileIds: [file.id],
+          tagIds: allTagIds,
+        });
+        if (data.code === 0) {
+          // 如果有新建标签，刷新标签列表
+          if (createdIds.length) await loadTags();
+          // 将标签追加到本地 row
+          const tagMap = new Map(tags.value.map((t) => [t.id, t]));
+          const fileExistingIds = new Set(file.tags.map((t) => t.id));
+          allTagIds.forEach((id) => {
+            if (!fileExistingIds.has(id) && tagMap.has(id)) {
+              file.tags.push({ id, name: tagMap.get(id).name });
+            }
+          });
+          ElMessage.success("标签添加成功");
+        }
+      } catch (e) { /* http拦截器已处理 */ }
+      hideInlineAddTag();
+    };
     const selectedFiles = ref([]);
     const onSelectionChange = (rows) => {
       selectedFiles.value = rows;
     };
+    // ----- 批量添加/移除标签 -----
+    const batchTagDialog = reactive({
+      visible: false,
+      mode: "add", // add | remove
+      tagIds: [],
+      loading: false,
+    });
+    const openBatchAddTag = () => {
+      if (!selectedFiles.value.length) { ElMessage.warning("请先选择文件"); return; }
+      batchTagDialog.mode = "add";
+      batchTagDialog.tagIds = [];
+      batchTagDialog.visible = true;
+    };
+    const openBatchRemoveTag = () => {
+      if (!selectedFiles.value.length) { ElMessage.warning("请先选择文件"); return; }
+      batchTagDialog.mode = "remove";
+      batchTagDialog.tagIds = [];
+      batchTagDialog.visible = true;
+    };
+    const submitBatchTag = async () => {
+      if (!batchTagDialog.tagIds.length) { ElMessage.warning("请选择标签"); return; }
+      batchTagDialog.loading = true;
+      try {
+        const fileIds = selectedFiles.value.map((f) => f.id);
+        const url = batchTagDialog.mode === "add" ? "/api/files/batch-add-tags" : "/api/files/batch-remove-tags";
+        const { data } = await http.post(url, { fileIds, tagIds: batchTagDialog.tagIds });
+        if (data.code === 0) {
+          ElMessage.success(data.msg);
+          batchTagDialog.visible = false;
+          await loadFiles();
+          loadTagCloud();
+        }
+      } finally {
+        batchTagDialog.loading = false;
+      }
+    };
+
+    // ----- 行内重命名 -----
+    const inlineRenameId = ref(null);
+    const inlineRenameName = ref("");
+    const startInlineRename = (file) => {
+      inlineRenameId.value = file.id;
+      inlineRenameName.value = file.name;
+    };
+    const cancelInlineRename = () => {
+      inlineRenameId.value = null;
+      inlineRenameName.value = "";
+    };
+    const submitInlineRename = async (file) => {
+      const name = (inlineRenameName.value || "").trim();
+      if (!name) {
+        ElMessage.warning("文件名不能为空");
+        return;
+      }
+      if (name === file.name) {
+        cancelInlineRename();
+        return;
+      }
+      try {
+        const { data } = await http.post(`/api/files/${file.id}/rename`, { name });
+        if (data.code === 0) {
+          ElMessage.success("重命名成功");
+          cancelInlineRename();
+          await loadFiles();
+        }
+      } catch (e) { /* interceptor handles */ }
+    };
+
+    // ----- 批量文件名替换 -----
+    const batchRenameDialog = reactive({
+      visible: false,
+      search: "",
+      replace: "",
+      useRegex: false,
+      regexError: "",
+      loading: false,
+    });
+    const openBatchRename = () => {
+      if (!selectedFiles.value.length) { ElMessage.warning("请先选择文件"); return; }
+      batchRenameDialog.search = "";
+      batchRenameDialog.replace = "";
+      batchRenameDialog.useRegex = false;
+      batchRenameDialog.regexError = "";
+      batchRenameDialog.visible = true;
+    };
+    const batchRenamePreview = computed(() => {
+      if (!batchRenameDialog.search) return [];
+      batchRenameDialog.regexError = "";
+      if (batchRenameDialog.useRegex) {
+        // 正则模式
+        let regex;
+        try {
+          regex = new RegExp(batchRenameDialog.search, "g");
+        } catch (e) {
+          batchRenameDialog.regexError = "正则表达式语法错误：" + e.message;
+          return [];
+        }
+        return selectedFiles.value
+          .map((f) => {
+            const re = new RegExp(batchRenameDialog.search, "g");
+            const newName = f.name.replace(re, batchRenameDialog.replace);
+            return { id: f.id, oldName: f.name, newName };
+          })
+          .filter((item) => item.newName !== item.oldName);
+      } else {
+        // 普通字符串模式
+        return selectedFiles.value
+          .filter((f) => f.name.includes(batchRenameDialog.search))
+          .map((f) => ({
+            id: f.id,
+            oldName: f.name,
+            newName: f.name.replaceAll(batchRenameDialog.search, batchRenameDialog.replace),
+          }));
+      }
+    });
+    const submitBatchRename = async () => {
+      if (!batchRenameDialog.search) { ElMessage.warning("查找内容不能为空"); return; }
+      if (batchRenameDialog.regexError) { ElMessage.warning("正则表达式有语法错误，请修正"); return; }
+      if (!batchRenamePreview.value.length) { ElMessage.warning("没有匹配到需要替换的文件"); return; }
+      batchRenameDialog.loading = true;
+      try {
+        const fileIds = selectedFiles.value.map((f) => f.id);
+        const { data } = await http.post("/api/files/batch-rename", {
+          fileIds,
+          search: batchRenameDialog.search,
+          replace: batchRenameDialog.replace,
+          useRegex: batchRenameDialog.useRegex,
+        });
+        if (data.code === 0) {
+          ElMessage.success(data.msg);
+          batchRenameDialog.visible = false;
+          await loadFiles();
+        }
+      } finally {
+        batchRenameDialog.loading = false;
+      }
+    };
+
     const batchDeleteFiles = async () => {
       if (!selectedFiles.value.length) {
         ElMessage.warning("请先选择要删除的文件");
@@ -1070,9 +1337,14 @@ const HomeView = {
     };
 
     const removeTag = async (node) => {
+      // 前端预检查：有子标签则提示
+      if (node.children && node.children.length > 0) {
+        ElMessage.warning("该标签下还有子标签，无法删除");
+        return;
+      }
       try {
         await ElMessageBox.confirm(
-          `确定删除 "${node.name}"？其下所有子 Tag 也会一并删除。`,
+          `确定删除 "${node.name}"？`,
           "确认删除",
           { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
         );
@@ -1080,12 +1352,8 @@ const HomeView = {
       const { data } = await http.delete(`/api/tags/${node.id}`);
       if (data.code === 0) {
         ElMessage.success("已删除");
-        // 收集被删除的 tag id（包括其所有子孙）
-        const removedIds = new Set();
-        const collect = (t) => { removedIds.add(t.id); if (t.children) t.children.forEach(collect); };
-        collect(node);
-        // 从已选标签中移除被删除的标签
-        selectedTags.value = selectedTags.value.filter((t) => !removedIds.has(t.id));
+        // 从已选标签中移除
+        selectedTags.value = selectedTags.value.filter((t) => t.id !== node.id);
         // 同步文件列表筛选条件
         fileQuery.tagIds = selectedTags.value.map((t) => t.id);
         await loadTags();
@@ -1146,6 +1414,61 @@ const HomeView = {
         }
       } finally {
         batchMoveDialog.loading = false;
+      }
+    };
+
+    // ----- 拖拽改变标签层级 -----
+    const allowTreeDrag = (node) => {
+      // 虚拟根节点不允许拖动
+      return !node.data._virtual;
+    };
+    const allowTreeDrop = (draggingNode, dropNode, type) => {
+      // 不允许拖到虚拟根节点的前面/后面（只能放到里面作为顶级）
+      if (dropNode.data._virtual) {
+        return type === "inner";
+      }
+      return true;
+    };
+    const onTreeNodeDrop = async (draggingNode, dropNode, dropType) => {
+      // 计算新的 parentId
+      let newParentId = null;
+      if (dropType === "inner") {
+        // 放入目标节点内部，目标节点成为父级
+        newParentId = dropNode.data._virtual ? null : dropNode.data.id;
+      } else {
+        // before / after: 与目标节点同级，取目标节点的父级
+        if (dropNode.parent && dropNode.parent.data && !dropNode.parent.data._virtual) {
+          newParentId = dropNode.parent.data.id;
+        } else {
+          newParentId = null; // 顶级
+        }
+      }
+      // 如果拖拽的节点在已勾选的标签中，则同时移动所有已勾选的标签
+      const checkedIds = (treeRef.value?.getCheckedKeys() || []).filter((k) => k !== VIRTUAL_ALL_ID);
+      const dragId = draggingNode.data.id;
+      let moveIds;
+      if (checkedIds.length > 1 && checkedIds.includes(dragId)) {
+        // 排除目标父级自身（不能移动到自己内部）
+        moveIds = checkedIds.filter((id) => id !== newParentId);
+      } else {
+        moveIds = [dragId];
+      }
+      try {
+        const { data } = await http.post("/api/tags/batch-move", {
+          ids: moveIds,
+          targetParentId: newParentId,
+        });
+        if (data.code === 0) {
+          await loadTags();
+          if (moveIds.length > 1) {
+            ElMessage.success(`已移动 ${moveIds.length} 个标签`);
+          }
+        } else {
+          ElMessage.error(data.msg || "移动失败");
+          await loadTags(); // 回滚UI
+        }
+      } catch (e) {
+        await loadTags(); // 回滚UI
       }
     };
 
@@ -1224,6 +1547,7 @@ const HomeView = {
       loadTags();
       loadFiles();
       loadTagCloud();
+      loadStats();
     });
 
     return {
@@ -1245,6 +1569,9 @@ const HomeView = {
       openBatchMove,
       batchMoveParentOptions,
       submitBatchMove,
+      allowTreeDrag,
+      allowTreeDrop,
+      onTreeNodeDrop,
       openPwd,
       submitPwd,
       openImport,
@@ -1303,25 +1630,110 @@ const HomeView = {
       onPageSizeChange,
       resetFileQuery,
       filterByTag,
+      removeFileTag,
+      inlineAddTagState,
+      showInlineAddTag,
+      hideInlineAddTag,
+      submitInlineAddTag,
       onFileQueryTagChange,
       tagTreeNoVirtual,
       genTagPickIds,
       onGenTagPick,
       selectedFiles,
       onSelectionChange,
+      batchTagDialog,
+      openBatchAddTag,
+      openBatchRemoveTag,
+      submitBatchTag,
       batchDeleteFiles,
       removeFile,
       copyFileName,
       fileEditDialog,
       openFileEdit,
       submitFileEdit,
+      // 行内重命名
+      inlineRenameId,
+      inlineRenameName,
+      startInlineRename,
+      cancelInlineRename,
+      submitInlineRename,
+      // 批量文件名替换
+      batchRenameDialog,
+      openBatchRename,
+      batchRenamePreview,
+      submitBatchRename,
+      // 统计列表
+      statsData,
+      statsTotal,
+      statsLoading,
+      statsQuery,
+      loadStats,
+      resetStats,
+      // 左侧树折叠
+      treeCollapsed,
+      // 各卡片折叠
+      genCollapsed,
+      tagCloudCollapsed,
+      filesCollapsed,
+      statsCollapsed,
     };
   },
   template: `
     <div class="layout">
       <div class="topbar">
-        <div class="title">🏷️ Tag 管理系统</div>
+        <div class="title">🏷️ Tag 管理系统 <span class="version-badge">v1.5.0</span></div>
         <div class="right">
+          <el-popover placement="bottom-start" :width="360" trigger="click">
+            <template #reference>
+              <el-button size="small" type="info" plain>📋 更新日志</el-button>
+            </template>
+            <div class="changelog">
+              <h4 style="margin:0 0 10px;">功能更新说明</h4>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.5.0 <span class="changelog-date">2025-06-13</span></div>
+                <ul>
+                  <li>新增文件统计面板（支持按标签/日期统计文件数量）</li>
+                  <li>统计支持日期范围与标签范围筛选</li>
+                </ul>
+              </div>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.4.0 <span class="changelog-date">2025-06-10</span></div>
+                <ul>
+                  <li>新增批量文件名替换功能</li>
+                  <li>新增标签云展示（云朵分布、悬停显示文件数）</li>
+                </ul>
+              </div>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.3.0 <span class="changelog-date">2025-06-06</span></div>
+                <ul>
+                  <li>新增文件导入/导出功能</li>
+                  <li>支持 [YYYYMMDD] 日期格式解析</li>
+                </ul>
+              </div>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.2.0 <span class="changelog-date">2025-05-28</span></div>
+                <ul>
+                  <li>新增批量移动标签</li>
+                  <li>文件名生成器支持拖拽排序标签</li>
+                </ul>
+              </div>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.1.0 <span class="changelog-date">2025-05-20</span></div>
+                <ul>
+                  <li>新增标签树层级管理</li>
+                  <li>支持标签拖拽排序</li>
+                </ul>
+              </div>
+              <div class="changelog-item">
+                <div class="changelog-version">v1.0.0 <span class="changelog-date">2025-05-10</span></div>
+                <ul>
+                  <li>基础登录/注册</li>
+                  <li>标签增删改查</li>
+                  <li>文件管理与标签关联</li>
+                </ul>
+              </div>
+            </div>
+          </el-popover>
           <span style="color:#606266;">{{ username }}</span>
           <el-button size="small" @click="openPwd">修改账号/密码</el-button>
           <el-button size="small" type="danger" plain @click="logout">退出</el-button>
@@ -1329,71 +1741,91 @@ const HomeView = {
       </div>
 
       <div class="main">
-        <div class="toolbar">
-          <el-button type="success" @click="openImport">📋 粘贴文本导入</el-button>
-          <el-input
-            v-model="filterText"
-            placeholder="搜索 Tag 名称"
-            clearable
-            style="width:240px"
-            @input="onFilterChange"
-          />
-          <span style="color:#909399;font-size:13px;">共 {{ tags.length }} 个 Tag</span>
-          <span style="color:#c0c4cc;font-size:12px;margin-left:auto;">提示：点击标签名编辑，悬停显示 + / × 按钮</span>
-        </div>
-
         <div class="split">
-          <div class="tree-card">
-            <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-              <el-button size="small" type="primary" plain @click="openCreate(null)">+ 新建顶级 Tag</el-button>
-              <el-button size="small" type="warning" plain @click="openBatchMove">📦 批量移动</el-button>
+          <div class="tree-card" :class="{ 'tree-collapsed': treeCollapsed }">
+            <div v-show="!treeCollapsed" class="tree-toggle-btn" @click="treeCollapsed = true" title="收起标签面板">
+              <span class="tree-toggle-arrow">◀</span>
             </div>
-            <div v-if="!tags.length" class="empty-tip">暂无 Tag，点击上方按钮创建第一个吧</div>
-            <el-tree
-              v-else
-              ref="treeRef"
-              :data="tagTree"
-              node-key="id"
-              default-expand-all
-              show-checkbox
-              :default-checked-keys="checkedKeys"
-              :expand-on-click-node="false"
-              :filter-node-method="filterNode"
-              @check="onTreeCheck"
-            >
-              <template #default="{ node, data }">
-                <div class="tag-node">
-                  <template v-if="data._virtual">
-                    <span class="name" style="font-weight:600;color:#409eff;">
-                      {{ data.name }}<span class="tag-child-count">({{ data.childCount }})</span>
-                    </span>
-                  </template>
-                  <template v-else>
-                    <span class="actions">
-                      <button
-                        class="icon-btn icon-add"
-                        title="新增子级"
-                        @click.stop="openCreate(data.id)"
-                      >+</button>
-                      <button
-                        class="icon-btn icon-del"
-                        title="删除"
-                        @click.stop="removeTag(data)"
-                      >×</button>
-                    </span>
-                    <span class="name name-clickable" @click.stop="openEdit(data)" :title="'点击编辑：' + data.name">
-                      {{ data.name }}<span v-if="data.childCount > 0" class="tag-child-count">({{ data.childCount }})</span>
-                      <span class="tag-meta">#{{ data.id }}</span>
-                      <span v-if="data.priority > 0" class="tag-priority-badge" :title="'优先级: ' + data.priority">⬆{{ data.priority }}</span>
-                    </span>
-                  </template>
+            <div v-if="treeCollapsed" class="tree-collapsed-inner" @click="treeCollapsed = false">
+              <div class="tree-collapsed-label">标签</div>
+              <div class="tree-expand-btn" title="展开标签面板">
+                <span class="tree-toggle-arrow">▶</span>
+              </div>
+            </div>
+            <div v-show="!treeCollapsed" class="tree-card-body">
+              <div class="tree-toolbar">
+                <div class="tree-toolbar-row">
+                  <el-button size="small" type="success" @click="openImport">📋 粘贴文本导入</el-button>
+                  <el-input
+                    v-model="filterText"
+                    placeholder="搜索 Tag 名称"
+                    clearable
+                    size="small"
+                    style="flex:1;"
+                    @input="onFilterChange"
+                  />
                 </div>
-              </template>
-            </el-tree>
+                <div class="tree-toolbar-row">
+                  <el-button size="small" type="primary" plain @click="openCreate(null)">+ 新建顶级 Tag</el-button>
+                  <el-button size="small" type="warning" plain @click="openBatchMove">📦 批量移动</el-button>
+                  <span style="color:#909399;font-size:12px;margin-left:auto;">共 {{ tags.length }} 个</span>
+                </div>
+              </div>
+              <div v-if="!tags.length" class="empty-tip">暂无 Tag，点击上方按钮创建第一个吧</div>
+              <el-tree
+                v-else
+                ref="treeRef"
+                :data="tagTree"
+                node-key="id"
+                default-expand-all
+                show-checkbox
+                draggable
+                :default-checked-keys="checkedKeys"
+                :expand-on-click-node="false"
+                :filter-node-method="filterNode"
+                :allow-drop="allowTreeDrop"
+                :allow-drag="allowTreeDrag"
+                @check="onTreeCheck"
+                @node-drop="onTreeNodeDrop"
+              >
+                <template #default="{ node, data }">
+                  <div class="tag-node">
+                    <template v-if="data._virtual">
+                      <span class="name" style="font-weight:600;color:#409eff;">
+                        {{ data.name }}<span class="tag-child-count">({{ data.childCount }})</span>
+                      </span>
+                    </template>
+                    <template v-else>
+                      <span class="actions">
+                        <button
+                          class="icon-btn icon-add"
+                          title="新增子级"
+                          @click.stop="openCreate(data.id)"
+                        >+</button>
+                        <button
+                          class="icon-btn icon-del"
+                          title="删除"
+                          @click.stop="removeTag(data)"
+                        >×</button>
+                      </span>
+                      <span class="name name-clickable" @click.stop="openEdit(data)" :title="'点击编辑：' + data.name">
+                        {{ data.name }}<span v-if="data.childCount > 0" class="tag-child-count">({{ data.childCount }})</span>
+                        <span class="tag-meta">#{{ data.id }}</span>
+                        <span v-if="data.priority > 0" class="tag-priority-badge" :title="'优先级: ' + data.priority">⬆{{ data.priority }}</span>
+                      </span>
+                    </template>
+                  </div>
+                </template>
+              </el-tree>
+            </div>
           </div>
 
           <div class="gen-card">
-            <div class="gen-title">📝 文件名生成器</div>
+            <div class="card-header-toggle" @click="genCollapsed = !genCollapsed">
+              <div class="gen-title" style="margin-bottom:0;">📝 文件名生成器</div>
+              <span class="card-toggle-arrow">{{ genCollapsed ? '▼' : '▲' }}</span>
+            </div>
+            <div v-show="!genCollapsed" class="card-collapsible-body">
             <div class="gen-row">
               <span class="gen-label">文件名</span>
               <el-input
@@ -1456,10 +1888,16 @@ const HomeView = {
               格式：<code>[当日日期]&lt;文件名小写&gt;_&lt;tag1.tag2.tag3&gt;</code>
             </div>
 
+            </div>
+
             <!-- 标签云 -->
-            <div class="tag-cloud-section" v-loading="tagCloudLoading">
-              <div class="tag-cloud-title">
-                <span>☁️ 标签云</span>
+            <div class="tag-cloud-section" :class="{ 'card-section-collapsed': tagCloudCollapsed }">
+              <div class="card-header-toggle" @click="tagCloudCollapsed = !tagCloudCollapsed">
+                <div class="tag-cloud-title" style="margin-bottom:0;">☁️ 标签云</div>
+                <span class="card-toggle-arrow">{{ tagCloudCollapsed ? '▼' : '▲' }}</span>
+              </div>
+              <div v-show="!tagCloudCollapsed" v-loading="tagCloudLoading" class="tag-cloud-body">
+              <div class="tag-cloud-tools-bar">
                 <span class="tag-cloud-tools">
                   <span class="tag-cloud-zoom">{{ Math.round(tagCloudView.scale * 100) }}%</span>
                   <el-button size="small" link @click="resetTagCloudView" title="重置视图">⟳ 重置</el-button>
@@ -1488,19 +1926,24 @@ const HomeView = {
                 </div>
                 <div class="tag-cloud-hint">滚轮缩放 · 拖拽平移</div>
               </div>
+              </div>
             </div>
           </div>
         </div>
 
         <!-- 文件列表 -->
         <div class="files-card">
-          <div class="files-header">
-            <div class="files-title">📁 文件列表 <span class="files-count">共 {{ filePagination.total }} 个</span></div>
-            <div class="files-actions">
-              <el-button size="small" type="success" @click="openFileImport">导入</el-button>
-              <el-button size="small" type="warning" @click="openExportDialog">导出</el-button>
+          <div class="card-header-toggle" @click="filesCollapsed = !filesCollapsed">
+            <div class="files-header" style="margin-bottom:0;">
+              <div class="files-title">📁 文件列表 <span class="files-count">共 {{ filePagination.total }} 个</span></div>
+              <div class="files-actions" @click.stop>
+                <el-button size="small" type="success" @click="openFileImport">导入</el-button>
+                <el-button size="small" type="warning" @click="openExportDialog">导出</el-button>
+              </div>
             </div>
+            <span class="card-toggle-arrow">{{ filesCollapsed ? '▼' : '▲' }}</span>
           </div>
+          <div v-show="!filesCollapsed" class="card-collapsible-body">
           <div class="files-filter">
             <el-input
               v-model="fileQuery.keyword"
@@ -1525,6 +1968,18 @@ const HomeView = {
               style="width:260px"
               @change="onFileQueryTagChange"
             />
+            <el-date-picker
+              v-model="fileQuery.dateRange"
+              type="daterange"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              format="YYYY-MM-DD"
+              value-format="YYYY-MM-DD"
+              clearable
+              style="width:260px"
+              @change="() => { filePagination.page = 1; loadFiles(); }"
+            />
             <el-radio-group v-model="fileQuery.mode" size="small" @change="loadFiles">
               <el-radio-button label="all">AND</el-radio-button>
               <el-radio-button label="any">OR</el-radio-button>
@@ -1535,6 +1990,9 @@ const HomeView = {
 
           <div v-if="selectedFiles.length" style="margin-top:12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;">
             <span style="color:#606266;font-size:13px;">已选 {{ selectedFiles.length }} 项</span>
+            <el-button size="small" type="primary" @click="openBatchAddTag">+ 批量添加标签</el-button>
+            <el-button size="small" type="warning" @click="openBatchRemoveTag">- 批量移除标签</el-button>
+            <el-button size="small" type="info" @click="openBatchRename">✏️ 批量替换文件名</el-button>
             <el-button size="small" type="danger" @click="batchDeleteFiles">批量删除</el-button>
           </div>
 
@@ -1555,20 +2013,57 @@ const HomeView = {
             </el-table-column>
             <el-table-column label="文件名" min-width="260">
               <template #default="{ row }">
-                <span style="font-family:SFMono-Regular,Consolas,Menlo,monospace;word-break:break-all;">{{ row.name }}</span>
+                <div v-if="inlineRenameId === row.id" style="display:flex;align-items:center;gap:4px;">
+                  <el-input
+                    v-model="inlineRenameName"
+                    size="small"
+                    style="flex:1;"
+                    @keyup.enter="submitInlineRename(row)"
+                    @keyup.escape="cancelInlineRename"
+                  />
+                  <el-button size="small" type="primary" link @click="submitInlineRename(row)">✓</el-button>
+                  <el-button size="small" link @click="cancelInlineRename">✗</el-button>
+                </div>
+                <span v-else style="font-family:SFMono-Regular,Consolas,Menlo,monospace;word-break:break-all;cursor:pointer;" @dblclick="startInlineRename(row)" title="双击重命名">{{ row.name }}</span>
               </template>
             </el-table-column>
             <el-table-column label="标签" min-width="260">
               <template #default="{ row }">
-                <div v-if="!row.tags.length" style="color:#c0c4cc;">-</div>
-                <div v-else style="display:flex;flex-wrap:wrap;gap:4px;">
-                  <el-tag v-for="t in row.tags" :key="t.id" size="small" type="info" style="cursor:pointer;" @click="filterByTag(t)">{{ t.name }}</el-tag>
+                <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+                  <template v-if="!row.tags.length && inlineAddTagState.fileId !== row.id">
+                    <span style="color:#c0c4cc;">-</span>
+                  </template>
+                  <el-tag v-for="t in row.tags" :key="t.id" size="small" type="info" closable style="cursor:pointer;" @click="filterByTag(t)" @close="removeFileTag(row, t)">{{ t.name }}</el-tag>
+                  <el-popover :visible="inlineAddTagState.fileId === row.id" placement="bottom" :width="240" @hide="hideInlineAddTag">
+                    <template #reference>
+                      <el-tag size="small" style="cursor:pointer;border-style:dashed;" @click="showInlineAddTag(row)">+</el-tag>
+                    </template>
+                    <div style="display:flex;flex-direction:column;gap:8px;" @keyup.enter="submitInlineAddTag(row)">
+                      <el-select
+                        v-model="inlineAddTagState.tagIds"
+                        multiple
+                        filterable
+                        allow-create
+                        default-first-option
+                        placeholder="选择或输入新标签"
+                        size="small"
+                        style="width:100%;"
+                      >
+                        <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
+                      </el-select>
+                      <div style="color:#909399;font-size:11px;">输入不存在的标签名可直接创建，回车确认</div>
+                      <div style="display:flex;justify-content:flex-end;gap:6px;">
+                        <el-button size="small" @click="hideInlineAddTag">取消</el-button>
+                        <el-button size="small" type="primary" @click="submitInlineAddTag(row)">确定</el-button>
+                      </div>
+                    </div>
+                  </el-popover>
                 </div>
               </template>
             </el-table-column>
             <el-table-column prop="createdAt" label="保存时间" width="160" sortable />
             <el-table-column prop="updatedAt" label="更新时间" width="160" sortable />
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="260" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" link type="primary" @click="copyFileName(row)">复制</el-button>
                 <el-button size="small" link @click="openFileEdit(row)">编辑</el-button>
@@ -1582,12 +2077,82 @@ const HomeView = {
               v-model:current-page="filePagination.page"
               v-model:page-size="filePagination.pageSize"
               :total="filePagination.total"
-              :page-sizes="[10, 20, 50, 100]"
+              :page-sizes="[10, 20, 50, 100, 500, 1000]"
               layout="total, sizes, prev, pager, next, jumper"
               background
               @current-change="onPageChange"
               @size-change="onPageSizeChange"
             />
+          </div>
+          </div>
+        </div>
+
+        <!-- 统计列表 -->
+        <div class="stats-card">
+          <div class="card-header-toggle" @click="statsCollapsed = !statsCollapsed">
+            <div class="stats-title">📊 文件统计 <span class="stats-count">共 {{ statsTotal }} 个文件</span></div>
+            <span class="card-toggle-arrow">{{ statsCollapsed ? '▼' : '▲' }}</span>
+          </div>
+          <div v-show="!statsCollapsed" class="card-collapsible-body">
+          <div class="stats-filter">
+            <el-radio-group v-model="statsQuery.groupBy" size="small" @change="loadStats">
+              <el-radio-button label="tag">按标签</el-radio-button>
+              <el-radio-button label="date">按日期</el-radio-button>
+            </el-radio-group>
+            <el-date-picker
+              v-model="statsQuery.dateRange"
+              type="daterange"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              format="YYYY-MM-DD"
+              value-format="YYYY-MM-DD"
+              clearable
+              size="small"
+              style="width:240px"
+              @change="loadStats"
+            />
+            <el-tree-select
+              v-model="statsQuery.tagIds"
+              :data="tagTreeNoVirtual"
+              :props="{ value: 'id', label: 'name', children: 'children' }"
+              node-key="id"
+              multiple
+              check-strictly
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="限定标签范围"
+              size="small"
+              style="width:220px"
+              @change="loadStats"
+            />
+            <el-button size="small" @click="resetStats">重置</el-button>
+          </div>
+          <el-table
+            v-loading="statsLoading"
+            :data="statsData"
+            stripe
+            size="small"
+            style="width:100%;margin-top:10px;"
+            max-height="360"
+            empty-text="暂无统计数据"
+          >
+            <el-table-column type="index" label="#" width="50" />
+            <el-table-column prop="label" :label="statsQuery.groupBy === 'tag' ? '标签' : '日期'" min-width="180">
+              <template #default="{ row }">
+                <span v-if="statsQuery.groupBy === 'tag'" style="cursor:pointer;color:#409eff;" @click="filterByTag({id: row.id, name: row.label})">{{ row.label }}</span>
+                <span v-else>{{ row.label }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="count" label="文件数" width="120" sortable />
+            <el-table-column label="占比" width="180">
+              <template #default="{ row }">
+                <el-progress :percentage="statsTotal ? Math.round(row.count / statsTotal * 100) : 0" :stroke-width="14" :text-inside="true" style="width:100%;" />
+              </template>
+            </el-table-column>
+          </el-table>
           </div>
         </div>
       </div>
@@ -1735,7 +2300,7 @@ const HomeView = {
           </el-form-item>
           <el-form-item label="优先级">
             <el-input-number v-model="editDialog.priority" :min="0" :max="999" :step="1" controls-position="right" style="width:160px" />
-            <span style="margin-left:8px;color:#909399;font-size:12px">数字越大，导出时排越前</span>
+            <span style="margin-left:8px;color:#909399;font-size:12px">数字越小，优先级越高，导出时排越前</span>
           </el-form-item>
         </el-form>
         <template #footer>
@@ -1766,6 +2331,71 @@ const HomeView = {
         <template #footer>
           <el-button @click="batchMoveDialog.visible=false">取消</el-button>
           <el-button type="primary" :loading="batchMoveDialog.loading" @click="submitBatchMove">确定移动</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 批量添加/移除标签 -->
+      <el-dialog v-model="batchTagDialog.visible" :title="batchTagDialog.mode === 'add' ? '批量添加标签' : '批量移除标签'" width="460px">
+        <p style="color:#606266;font-size:13px;margin-bottom:12px;">
+          {{ batchTagDialog.mode === 'add' ? '为选中的文件添加以下标签：' : '从选中的文件移除以下标签：' }}
+        </p>
+        <el-tree-select
+          v-model="batchTagDialog.tagIds"
+          :data="tagTreeNoVirtual"
+          :props="{ value: 'id', label: 'name', children: 'children' }"
+          node-key="id"
+          multiple
+          check-strictly
+          filterable
+          clearable
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="搜索并选择标签"
+          style="width:100%"
+        />
+        <template #footer>
+          <el-button @click="batchTagDialog.visible=false">取消</el-button>
+          <el-button :type="batchTagDialog.mode === 'add' ? 'primary' : 'warning'" :loading="batchTagDialog.loading" @click="submitBatchTag">确定</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 批量替换文件名 -->
+      <el-dialog v-model="batchRenameDialog.visible" title="批量替换文件名" width="560px">
+        <p style="color:#606266;font-size:13px;margin-bottom:12px;">
+          对选中的 {{ selectedFiles.length }} 个文件执行文件名查找替换操作。
+        </p>
+        <el-form label-width="80px">
+          <el-form-item label="查找">
+            <el-input v-model="batchRenameDialog.search" :placeholder="batchRenameDialog.useRegex ? '输入正则表达式，如 ^abc|\\\\d+' : '输入要查找的字符串'" clearable />
+          </el-form-item>
+          <el-form-item label="替换为">
+            <el-input v-model="batchRenameDialog.replace" :placeholder="batchRenameDialog.useRegex ? '支持 $1、$2 等捕获组引用（留空则删除）' : '替换为（留空则删除匹配内容）'" clearable />
+          </el-form-item>
+          <el-form-item label="正则">
+            <el-switch v-model="batchRenameDialog.useRegex" active-text="启用正则表达式" />
+          </el-form-item>
+        </el-form>
+        <div v-if="batchRenameDialog.regexError" style="color:#f56c6c;font-size:12px;margin-top:4px;margin-bottom:8px;">
+          ⚠️ {{ batchRenameDialog.regexError }}
+        </div>
+        <div v-if="batchRenameDialog.useRegex && !batchRenameDialog.regexError" style="color:#909399;font-size:12px;margin-bottom:8px;">
+          💡 提示：替换串中可使用 <code>$1</code>、<code>$2</code> 引用捕获组，<code>$&</code> 引用整个匹配
+        </div>
+        <div v-if="batchRenameDialog.search" style="margin-top:8px;">
+          <div style="color:#606266;margin-bottom:6px;font-size:13px;">
+            预览（{{ batchRenamePreview.length }} 个文件将被修改）：
+          </div>
+          <div v-if="!batchRenamePreview.length && !batchRenameDialog.regexError" style="color:#c0c4cc;font-size:13px;">没有匹配到包含该字符串的文件</div>
+          <div v-else-if="batchRenamePreview.length" style="max-height:200px;overflow:auto;border:1px solid #ebeef5;border-radius:4px;padding:8px;">
+            <div v-for="item in batchRenamePreview" :key="item.id" style="margin-bottom:6px;font-size:13px;line-height:1.6;">
+              <div><span style="color:#909399;">原：</span><span style="text-decoration:line-through;color:#f56c6c;">{{ item.oldName }}</span></div>
+              <div><span style="color:#909399;">新：</span><span style="color:#67c23a;font-weight:500;">{{ item.newName }}</span></div>
+            </div>
+          </div>
+        </div>
+        <template #footer>
+          <el-button @click="batchRenameDialog.visible=false">取消</el-button>
+          <el-button type="primary" :loading="batchRenameDialog.loading" :disabled="!batchRenamePreview.length" @click="submitBatchRename">确定替换</el-button>
         </template>
       </el-dialog>
 

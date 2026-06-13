@@ -533,7 +533,14 @@ def delete_tag(tag_id):
     row = db.execute("SELECT id FROM tags WHERE id=?", (tag_id,)).fetchone()
     if not row:
         return jsonify({"code": 404, "msg": "tag 不存在"}), 404
-    # ON DELETE CASCADE 会一并删除子孙
+    # 检查是否有子标签
+    child = db.execute("SELECT id FROM tags WHERE parent_id=?", (tag_id,)).fetchone()
+    if child:
+        return jsonify({"code": 400, "msg": "该标签下还有子标签，无法删除"}), 400
+    # 检查是否有关联文件
+    file_link = db.execute("SELECT file_id FROM file_tags WHERE tag_id=?", (tag_id,)).fetchone()
+    if file_link:
+        return jsonify({"code": 400, "msg": "该标签还有关联文件，无法删除"}), 400
     db.execute("DELETE FROM tags WHERE id=?", (tag_id,))
     db.commit()
     return jsonify({"code": 0, "msg": "已删除"})
@@ -651,11 +658,15 @@ def list_files():
       - keyword: 文件名模糊搜索
       - tagIds:  逗号分隔的 tag id 列表，按 AND 过滤（同时包含全部）
       - mode:    "all"（默认，AND） | "any"（OR）
+      - dateFrom: 保存时间起始（含），格式 YYYY-MM-DD
+      - dateTo:   保存时间截止（含），格式 YYYY-MM-DD
     """
     db = get_db()
     keyword = (request.args.get("keyword") or "").strip()
     tag_ids_raw = (request.args.get("tagIds") or "").strip()
     mode = (request.args.get("mode") or "all").strip().lower()
+    date_from = (request.args.get("dateFrom") or "").strip()
+    date_to = (request.args.get("dateTo") or "").strip()
 
     tag_ids = []
     if tag_ids_raw:
@@ -669,6 +680,14 @@ def list_files():
     if keyword:
         sql += " AND f.name LIKE ?"
         params.append(f"%{keyword}%")
+
+    # 按保存时间范围过滤（基于 created_at 字段）
+    if date_from:
+        sql += " AND f.created_at >= ?"
+        params.append(f"{date_from} 00:00:00")
+    if date_to:
+        sql += " AND f.created_at <= ?"
+        params.append(f"{date_to} 23:59:59")
 
     if tag_ids:
         placeholders = ",".join("?" * len(tag_ids))
@@ -969,8 +988,8 @@ def export_files():
         ).fetchall()
         tag_id_list = [t["id"] for t in tag_rows]
 
-        # 所有标签按 priority 降序排列（优先级高的排前面）
-        sorted_tags = sorted(tag_rows, key=lambda t: t["priority"], reverse=True)
+        # 所有标签按 priority 升序排列（数字越小优先级越高，排越前面）
+        sorted_tags = sorted(tag_rows, key=lambda t: t["priority"])
         all_tag_names = [t["name"] for t in sorted_tags]
 
         # 构建显示行：[日期]文件名_标签1.标签2
@@ -1042,6 +1061,78 @@ def export_files():
     )
 
 
+@app.get("/api/files/stats")
+@auth_required
+def file_stats():
+    """文件统计
+    支持参数:
+      - groupBy: "tag"（按标签统计） | "date"（按日期统计，默认）
+      - dateFrom: 起始日期（含），格式 YYYY-MM-DD
+      - dateTo:   截止日期（含），格式 YYYY-MM-DD
+      - tagIds:   逗号分隔的 tag id，限定范围
+    """
+    db = get_db()
+    group_by = (request.args.get("groupBy") or "date").strip().lower()
+    date_from = (request.args.get("dateFrom") or "").strip()
+    date_to = (request.args.get("dateTo") or "").strip()
+    tag_ids_raw = (request.args.get("tagIds") or "").strip()
+
+    tag_ids = []
+    if tag_ids_raw:
+        for s in tag_ids_raw.split(","):
+            s = s.strip()
+            if s.isdigit():
+                tag_ids.append(int(s))
+
+    if group_by == "tag":
+        # 按标签统计：每个标签关联多少文件
+        sql = """
+            SELECT t.id AS tag_id, t.name AS tag_name, COUNT(DISTINCT ft.file_id) AS file_count
+            FROM tags t
+            LEFT JOIN file_tags ft ON ft.tag_id = t.id
+            LEFT JOIN files f ON f.id = ft.file_id
+            WHERE 1=1
+        """
+        params = []
+        if date_from:
+            sql += " AND f.created_at >= ?"
+            params.append(f"{date_from} 00:00:00")
+        if date_to:
+            sql += " AND f.created_at <= ?"
+            params.append(f"{date_to} 23:59:59")
+        if tag_ids:
+            placeholders = ",".join("?" * len(tag_ids))
+            sql += f" AND t.id IN ({placeholders})"
+            params.extend(tag_ids)
+        sql += " GROUP BY t.id ORDER BY file_count DESC, t.id ASC"
+        rows = db.execute(sql, params).fetchall()
+        data = [{"label": r["tag_name"], "id": r["tag_id"], "count": r["file_count"]} for r in rows if r["file_count"] > 0]
+    else:
+        # 按日期统计：每天有多少文件
+        sql = """
+            SELECT DATE(f.created_at) AS day, COUNT(*) AS file_count
+            FROM files f
+            WHERE 1=1
+        """
+        params = []
+        if date_from:
+            sql += " AND f.created_at >= ?"
+            params.append(f"{date_from} 00:00:00")
+        if date_to:
+            sql += " AND f.created_at <= ?"
+            params.append(f"{date_to} 23:59:59")
+        if tag_ids:
+            placeholders = ",".join("?" * len(tag_ids))
+            sql += f" AND f.id IN (SELECT file_id FROM file_tags WHERE tag_id IN ({placeholders}))"
+            params.extend(tag_ids)
+        sql += " GROUP BY day ORDER BY day DESC"
+        rows = db.execute(sql, params).fetchall()
+        data = [{"label": r["day"], "count": r["file_count"]} for r in rows]
+
+    total = sum(item["count"] for item in data)
+    return jsonify({"code": 0, "data": data, "total": total})
+
+
 @app.delete("/api/files/<int:file_id>")
 @auth_required
 def delete_file(file_id):
@@ -1052,6 +1143,147 @@ def delete_file(file_id):
     db.execute("DELETE FROM files WHERE id=?", (file_id,))
     db.commit()
     return jsonify({"code": 0, "msg": "已删除"})
+
+
+@app.post("/api/files/batch-add-tags")
+@auth_required
+def batch_add_tags():
+    """批量为文件添加标签，入参: { fileIds: [int], tagIds: [int] }"""
+    data = request.get_json(silent=True) or {}
+    file_ids = data.get("fileIds") or []
+    tag_ids = data.get("tagIds") or []
+    if not file_ids or not tag_ids:
+        return jsonify({"code": 400, "msg": "fileIds 和 tagIds 不能为空"}), 400
+    db = get_db()
+    valid_tag_ids = _validate_tag_ids(db, tag_ids)
+    if not valid_tag_ids:
+        return jsonify({"code": 400, "msg": "所选标签不存在"}), 400
+    count = 0
+    for fid in file_ids:
+        # 获取当前文件已有的最大 position
+        max_pos_row = db.execute(
+            "SELECT MAX(position) FROM file_tags WHERE file_id=?", (fid,)
+        ).fetchone()
+        pos = (max_pos_row[0] or 0) + 1
+        for tid in valid_tag_ids:
+            # 如果已存在则跳过
+            exists = db.execute(
+                "SELECT 1 FROM file_tags WHERE file_id=? AND tag_id=?", (fid, tid)
+            ).fetchone()
+            if not exists:
+                db.execute(
+                    "INSERT INTO file_tags(file_id, tag_id, position) VALUES(?, ?, ?)",
+                    (fid, tid, pos),
+                )
+                pos += 1
+                count += 1
+        db.execute(
+            "UPDATE files SET updated_at=datetime('now','localtime') WHERE id=?", (fid,)
+        )
+    db.commit()
+    return jsonify({"code": 0, "msg": f"已为 {len(file_ids)} 个文件添加标签（新增 {count} 条关联）"})
+
+
+@app.post("/api/files/batch-remove-tags")
+@auth_required
+def batch_remove_tags():
+    """批量移除文件的标签，入参: { fileIds: [int], tagIds: [int] }"""
+    data = request.get_json(silent=True) or {}
+    file_ids = data.get("fileIds") or []
+    tag_ids = data.get("tagIds") or []
+    if not file_ids or not tag_ids:
+        return jsonify({"code": 400, "msg": "fileIds 和 tagIds 不能为空"}), 400
+    db = get_db()
+    f_placeholders = ",".join("?" * len(file_ids))
+    t_placeholders = ",".join("?" * len(tag_ids))
+    db.execute(
+        f"DELETE FROM file_tags WHERE file_id IN ({f_placeholders}) AND tag_id IN ({t_placeholders})",
+        file_ids + tag_ids,
+    )
+    for fid in file_ids:
+        db.execute(
+            "UPDATE files SET updated_at=datetime('now','localtime') WHERE id=?", (fid,)
+        )
+    db.commit()
+    return jsonify({"code": 0, "msg": f"已从 {len(file_ids)} 个文件移除所选标签"})
+
+
+@app.post("/api/files/batch-rename")
+@auth_required
+def batch_rename_files():
+    """批量重命名文件（查找替换，支持正则表达式）
+    入参: { fileIds: [int], search: str, replace: str, useRegex: bool }
+    将每个文件名中的 search 替换为 replace
+    当 useRegex 为 true 时，search 作为正则表达式使用，replace 中可使用 \\1 等反向引用
+    """
+    import re as _re
+
+    data = request.get_json(silent=True) or {}
+    file_ids = data.get("fileIds") or []
+    search = data.get("search", "")
+    replace_str = data.get("replace", "")
+    use_regex = data.get("useRegex", False)
+    if not file_ids:
+        return jsonify({"code": 400, "msg": "fileIds 不能为空"}), 400
+    if not search:
+        return jsonify({"code": 400, "msg": "查找内容不能为空"}), 400
+
+    # 如果使用正则表达式，先验证语法
+    regex_pattern = None
+    if use_regex:
+        try:
+            regex_pattern = _re.compile(search)
+        except _re.error as e:
+            return jsonify({"code": 400, "msg": f"正则表达式语法错误：{str(e)}"}), 400
+        # 将前端 JS 风格的替换引用 ($1, $2, $&) 转换为 Python re.sub 风格 (\1, \2, \g<0>)
+        replace_str = _re.sub(r'\$&', r'\\g<0>', replace_str)  # $& -> 整个匹配
+        replace_str = _re.sub(r'\$(\d+)', lambda m: '\\' + m.group(1), replace_str)  # $1 -> \1
+
+    db = get_db()
+    renamed_count = 0
+    for fid in file_ids:
+        row = db.execute("SELECT id, name FROM files WHERE id=?", (fid,)).fetchone()
+        if not row:
+            continue
+        old_name = row["name"]
+        if use_regex:
+            new_name = regex_pattern.sub(replace_str, old_name)
+        else:
+            new_name = old_name.replace(search, replace_str)
+        if new_name != old_name:
+            if not new_name.strip():
+                continue  # 替换后为空则跳过
+            db.execute(
+                "UPDATE files SET name=?, updated_at=datetime('now','localtime') WHERE id=?",
+                (new_name.strip(), fid),
+            )
+            renamed_count += 1
+    db.commit()
+    return jsonify({"code": 0, "msg": f"已重命名 {renamed_count} 个文件"})
+
+
+@app.post("/api/files/<int:file_id>/rename")
+@auth_required
+def rename_file(file_id):
+    """单个文件重命名
+    入参: { name: str }
+    """
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"code": 400, "msg": "文件名不能为空"}), 400
+
+    db = get_db()
+    row = db.execute("SELECT id FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        return jsonify({"code": 404, "msg": "文件不存在"}), 404
+
+    db.execute(
+        "UPDATE files SET name=?, updated_at=datetime('now','localtime') WHERE id=?",
+        (name, file_id),
+    )
+    db.commit()
+    return jsonify({"code": 0, "msg": "重命名成功", "data": fetch_file_with_tags(db, file_id)})
 
 
 @app.post("/api/files/batch-delete")
@@ -1088,4 +1320,4 @@ def static_files(filename):
 
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=5050, debug=True)
+    app.run(host="0.0.0.0", port=5051, debug=True)
