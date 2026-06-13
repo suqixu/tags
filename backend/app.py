@@ -667,6 +667,8 @@ def list_files():
     mode = (request.args.get("mode") or "all").strip().lower()
     date_from = (request.args.get("dateFrom") or "").strip()
     date_to = (request.args.get("dateTo") or "").strip()
+    sort_field = (request.args.get("sortField") or "").strip()
+    sort_order = (request.args.get("sortOrder") or "").strip()  # asc | desc
 
     tag_ids = []
     if tag_ids_raw:
@@ -705,7 +707,13 @@ def list_files():
             params.extend(tag_ids)
             params.append(len(tag_ids))
 
-    sql += " ORDER BY f.updated_at DESC, f.id DESC"
+    # 排序
+    allowed_sort_fields = {"name": "f.name", "createdAt": "f.created_at", "updatedAt": "f.updated_at"}
+    if sort_field in allowed_sort_fields:
+        direction = "ASC" if sort_order == "asc" else "DESC"
+        sql += f" ORDER BY {allowed_sort_fields[sort_field]} {direction}, f.id DESC"
+    else:
+        sql += " ORDER BY f.updated_at DESC, f.id DESC"
 
     # 分页
     page = request.args.get("page", "1")

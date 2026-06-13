@@ -535,6 +535,14 @@ body {
   margin-top: 14px;
 }
 
+/* 文件名关键词高亮 */
+.highlight-keyword {
+  background: #fef08a;
+  color: #92400e;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 /* 卡片折叠通用样式 */
 .card-header-toggle {
   display: flex;

@@ -908,6 +908,8 @@ const HomeView = {
       tagIds: [],
       mode: "all", // all | any
       dateRange: null, // [startDate, endDate]
+      sortField: "", // name | createdAt | updatedAt
+      sortOrder: "", // asc | desc
     });
     const fileLoading = ref(false);
     const filePagination = reactive({
@@ -926,6 +928,10 @@ const HomeView = {
         if (fileQuery.tagIds.length) {
           params.tagIds = fileQuery.tagIds.join(",");
           params.mode = fileQuery.mode;
+        }
+        if (fileQuery.sortField) {
+          params.sortField = fileQuery.sortField;
+          params.sortOrder = fileQuery.sortOrder || "asc";
         }
         if (fileQuery.dateRange && fileQuery.dateRange.length === 2) {
           // value-format="YYYY-MM-DD" 时返回字符串，否则返回 Date 对象
@@ -960,11 +966,32 @@ const HomeView = {
       fileQuery.tagIds = [];
       fileQuery.mode = "all";
       fileQuery.dateRange = null;
+      fileQuery.sortField = "";
+      fileQuery.sortOrder = "";
       filePagination.page = 1;
       // 同步清空左侧树的勾选
       treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
       selectedTags.value = [];
       loadFiles();
+    };
+    // 表格排序变化
+    const onFileSortChange = ({ prop, order }) => {
+      if (order) {
+        fileQuery.sortField = prop;
+        fileQuery.sortOrder = order === "ascending" ? "asc" : "desc";
+      } else {
+        fileQuery.sortField = "";
+        fileQuery.sortOrder = "";
+      }
+      filePagination.page = 1;
+      loadFiles();
+    };
+    // 文件名关键词高亮
+    const highlightKeyword = (text, keyword) => {
+      if (!keyword || !text) return text;
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(${escaped})`, "gi");
+      return text.replace(re, '<span class="highlight-keyword">$1</span>');
     };
     // 文件列表标签下拉变化时同步左侧树勾选并刷新
     const onFileQueryTagChange = (ids) => {
@@ -1552,12 +1579,9 @@ const HomeView = {
     };
 
     // 树过滤 — 模糊子序列匹配（忽略大小写，支持分散字符）
-    const filterNode = (value, data) => {
-      if (!value) return true;
-      // 虚拟根节点始终显示
-      if (data._virtual) return true;
-      const query = value.toLowerCase();
-      const target = data.name.toLowerCase();
+    // 判断单个名称是否匹配关键词
+    const nameMatchesQuery = (name, query) => {
+      const target = name.toLowerCase();
       // 先尝试 includes 快速路径
       if (target.includes(query)) return true;
       // 子序列匹配：query 的每个字符按顺序出现在 target 中即可
@@ -1566,6 +1590,28 @@ const HomeView = {
         if (target[ti] === query[qi]) qi++;
       }
       return qi === query.length;
+    };
+    // 判断某个节点的祖先链中是否有匹配的（通过 parentId 回溯平铺数据）
+    const ancestorMatches = (nodeData, query) => {
+      let pid = nodeData.parentId;
+      while (pid) {
+        const parent = tags.value.find((t) => t.id === pid);
+        if (!parent) break;
+        if (nameMatchesQuery(parent.name, query)) return true;
+        pid = parent.parentId;
+      }
+      return false;
+    };
+    const filterNode = (value, data) => {
+      if (!value) return true;
+      // 虚拟根节点始终显示
+      if (data._virtual) return true;
+      const query = value.toLowerCase();
+      // 自身匹配
+      if (nameMatchesQuery(data.name, query)) return true;
+      // 父级匹配时，子级也要显示
+      if (ancestorMatches(data, query)) return true;
+      return false;
     };
     const onFilterChange = (v) => {
       treeRef.value?.filter(v);
@@ -1660,6 +1706,8 @@ const HomeView = {
       onPageChange,
       onPageSizeChange,
       resetFileQuery,
+      onFileSortChange,
+      highlightKeyword,
       filterByTag,
       removeFileTag,
       inlineAddTagState,
@@ -2043,15 +2091,16 @@ const HomeView = {
             style="width:100%;margin-top:12px;"
             empty-text="暂无文件，在上方生成器中点击 保存 即可"
             @selection-change="onSelectionChange"
+            @sort-change="onFileSortChange"
           >
             <el-table-column type="selection" width="45" />
             <el-table-column prop="id" label="ID" width="70" />
-            <el-table-column label="日期" width="110" sortable :sort-method="(a,b) => a.createdAt < b.createdAt ? -1 : 1">
+            <el-table-column label="日期" width="110" prop="createdAt" sortable="custom">
               <template #default="{ row }">
                 <span>{{ row.createdAt ? row.createdAt.slice(0, 10) : '-' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="文件名" min-width="260">
+            <el-table-column label="文件名" min-width="260" prop="name" sortable="custom">
               <template #default="{ row }">
                 <div v-if="inlineRenameId === row.id" style="display:flex;align-items:center;gap:4px;">
                   <el-input
@@ -2064,7 +2113,7 @@ const HomeView = {
                   <el-button size="small" type="primary" link @click="submitInlineRename(row)">✓</el-button>
                   <el-button size="small" link @click="cancelInlineRename">✗</el-button>
                 </div>
-                <span v-else style="font-family:SFMono-Regular,Consolas,Menlo,monospace;word-break:break-all;cursor:pointer;" @dblclick="startInlineRename(row)" title="双击重命名">{{ row.name }}</span>
+                <span v-else style="font-family:SFMono-Regular,Consolas,Menlo,monospace;word-break:break-all;cursor:pointer;" @dblclick="startInlineRename(row)" title="双击重命名" v-html="fileQuery.keyword ? highlightKeyword(row.name, fileQuery.keyword) : row.name"></span>
               </template>
             </el-table-column>
             <el-table-column label="标签" min-width="260">
@@ -2073,7 +2122,7 @@ const HomeView = {
                   <template v-if="!row.tags.length && inlineAddTagState.fileId !== row.id">
                     <span style="color:#c0c4cc;">-</span>
                   </template>
-                  <el-tag v-for="t in row.tags" :key="t.id" size="small" type="info" closable style="cursor:pointer;" @click="filterByTag(t)" @close="removeFileTag(row, t)">{{ t.name }}</el-tag>
+                  <el-tag v-for="t in row.tags" :key="t.id" size="small" :type="fileQuery.tagIds.includes(t.id) ? '' : 'info'" :effect="fileQuery.tagIds.includes(t.id) ? 'dark' : 'light'" closable style="cursor:pointer;" @click="filterByTag(t)" @close="removeFileTag(row, t)">{{ t.name }}</el-tag>
                   <el-popover :visible="inlineAddTagState.fileId === row.id" placement="bottom" :width="240" @hide="hideInlineAddTag">
                     <template #reference>
                       <el-tag size="small" style="cursor:pointer;border-style:dashed;" @click="showInlineAddTag(row)">+</el-tag>
@@ -2101,8 +2150,8 @@ const HomeView = {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column prop="createdAt" label="保存时间" width="160" sortable />
-            <el-table-column prop="updatedAt" label="更新时间" width="160" sortable />
+            <el-table-column prop="createdAt" label="保存时间" width="160" sortable="custom" />
+            <el-table-column prop="updatedAt" label="更新时间" width="160" sortable="custom" />
             <el-table-column label="操作" width="260" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" link type="primary" @click="copyFileName(row)">复制</el-button>
