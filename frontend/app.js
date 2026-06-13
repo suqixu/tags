@@ -1,6 +1,6 @@
 /* global Vue, ElementPlus, ElementPlusIconsVue, axios */
 
-const { createApp, ref, reactive, computed, onMounted, h } = Vue;
+const { createApp, ref, reactive, computed, onMounted, watch, h } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
 
 // API 基础地址：与后端同源时为空（由 Flask 静态托管），独立运行时可以改成 http://localhost:5050
@@ -83,7 +83,10 @@ const HomeView = {
     const tags = ref([]); // 平铺
     const treeRef = ref(null);
     const filterText = ref("");
-    const treeCollapsed = ref(false);
+    // 卡片折叠状态持久化
+    const CARD_COLLAPSE_KEY = "tag_card_collapsed_state";
+    const savedCardState = JSON.parse(localStorage.getItem(CARD_COLLAPSE_KEY) || "{}");
+    const treeCollapsed = ref(!!savedCardState.tree);
 
     // 树节点展开状态持久化
     const TREE_EXPAND_KEY = "tag_tree_expanded_keys";
@@ -106,10 +109,22 @@ const HomeView = {
       treeExpandedKeys.value = treeExpandedKeys.value.filter((k) => k !== nodeData.id);
       saveExpandedKeys();
     };
-    const genCollapsed = ref(false);
-    const tagCloudCollapsed = ref(false);
-    const filesCollapsed = ref(false);
-    const statsCollapsed = ref(false);
+    const genCollapsed = ref(!!savedCardState.gen);
+    const tagCloudCollapsed = ref(!!savedCardState.tagCloud);
+    const filesCollapsed = ref(!!savedCardState.files);
+    const statsCollapsed = ref(!!savedCardState.stats);
+
+    // 监听所有折叠状态变化并保存
+    const saveCardCollapseState = () => {
+      localStorage.setItem(CARD_COLLAPSE_KEY, JSON.stringify({
+        tree: treeCollapsed.value,
+        gen: genCollapsed.value,
+        tagCloud: tagCloudCollapsed.value,
+        files: filesCollapsed.value,
+        stats: statsCollapsed.value,
+      }));
+    };
+    watch([treeCollapsed, genCollapsed, tagCloudCollapsed, filesCollapsed, statsCollapsed], saveCardCollapseState);
 
     // 树形结构（包含虚拟"全部标签"根节点，方便全选操作）
     const VIRTUAL_ALL_ID = "__all__";
