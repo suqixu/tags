@@ -1137,7 +1137,28 @@ def file_stats():
         rows = db.execute(sql, params).fetchall()
         data = [{"label": r["day"], "count": r["file_count"]} for r in rows]
 
-    total = sum(item["count"] for item in data)
+    # total 应为去重后的实际文件数（一个文件有多个标签不重复计算）
+    if group_by == "date":
+        total = sum(item["count"] for item in data)
+    else:
+        # 按标签分组时，直接查询符合条件的不重复文件数
+        count_sql = "SELECT COUNT(DISTINCT f.id) AS cnt FROM files f"
+        count_params = []
+        wheres = []
+        if date_from:
+            wheres.append("f.created_at >= ?")
+            count_params.append(f"{date_from} 00:00:00")
+        if date_to:
+            wheres.append("f.created_at <= ?")
+            count_params.append(f"{date_to} 23:59:59")
+        if tag_ids:
+            placeholders = ",".join("?" * len(tag_ids))
+            count_sql += f" JOIN file_tags ft ON ft.file_id = f.id"
+            wheres.append(f"ft.tag_id IN ({placeholders})")
+            count_params.extend(tag_ids)
+        if wheres:
+            count_sql += " WHERE " + " AND ".join(wheres)
+        total = db.execute(count_sql, count_params).fetchone()["cnt"]
     return jsonify({"code": 0, "data": data, "total": total})
 
 
