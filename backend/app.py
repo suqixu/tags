@@ -693,7 +693,11 @@ def list_files():
 
     if tag_ids:
         placeholders = ",".join("?" * len(tag_ids))
-        if mode == "any":
+        if mode == "not":
+            # NOT：排除包含任一选中标签的文件
+            sql += f" AND f.id NOT IN (SELECT file_id FROM file_tags WHERE tag_id IN ({placeholders}))"
+            params.extend(tag_ids)
+        elif mode == "any":
             sql += f" AND f.id IN (SELECT file_id FROM file_tags WHERE tag_id IN ({placeholders}))"
             params.extend(tag_ids)
         else:

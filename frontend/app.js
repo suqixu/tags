@@ -921,7 +921,7 @@ const HomeView = {
     const fileQuery = reactive({
       keyword: "",
       tagIds: [],
-      mode: "all", // all | any
+      mode: "all", // all | any | not
       dateRange: null, // [startDate, endDate]
       sortField: "", // name | createdAt | updatedAt
       sortOrder: "", // asc | desc
@@ -1186,9 +1186,9 @@ const HomeView = {
     });
     const openBatchRename = () => {
       if (!selectedFiles.value.length) { ElMessage.warning("请先选择文件"); return; }
-      batchRenameDialog.search = "";
-      batchRenameDialog.replace = "";
-      batchRenameDialog.useRegex = false;
+      batchRenameDialog.search = "(.*)_";
+      batchRenameDialog.replace = "$1";
+      batchRenameDialog.useRegex = true;
       batchRenameDialog.regexError = "";
       batchRenameDialog.visible = true;
     };
@@ -2094,6 +2094,7 @@ const HomeView = {
             <el-radio-group v-model="fileQuery.mode" size="small" @change="loadFiles">
               <el-radio-button label="all">AND</el-radio-button>
               <el-radio-button label="any">OR</el-radio-button>
+              <el-radio-button label="not">NOT</el-radio-button>
             </el-radio-group>
             <el-button type="primary" @click="loadFiles">查询</el-button>
             <el-button @click="resetFileQuery">重置</el-button>
