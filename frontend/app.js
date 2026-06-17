@@ -1,6 +1,6 @@
 /* global Vue, ElementPlus, ElementPlusIconsVue, axios */
 
-const { createApp, ref, reactive, computed, onMounted, watch, h } = Vue;
+const { createApp, ref, reactive, computed, onMounted, watch, nextTick, h } = Vue;
 const { ElMessage, ElMessageBox } = ElementPlus;
 
 // API 基础地址：与后端同源时为空（由 Flask 静态托管），独立运行时可以改成 http://localhost:5050
@@ -292,6 +292,7 @@ const HomeView = {
       loadFiles();
     };
     // 文件名生成器中通过搜索选择标签
+    const genTagPickRef = ref(null);
     const genTagPickIds = computed({
       get: () => selectedTags.value.map((t) => t.id),
       set: () => { /* 由 onGenTagPick 处理 */ },
@@ -307,6 +308,11 @@ const HomeView = {
         }
       });
       selectedTags.value = kept;
+      // 选中标签后清空搜索输入框
+      nextTick(() => {
+        const input = genTagPickRef.value?.$el?.querySelector("input");
+        if (input) { input.value = ""; input.dispatchEvent(new Event("input")); }
+      });
       // 同步左侧树勾选
       treeRef.value?.setChecked(VIRTUAL_ALL_ID, false, true);
       selectedTags.value.forEach((t) => treeRef.value?.setChecked(t.id, true, false));
@@ -1047,6 +1053,13 @@ const HomeView = {
       } catch (e) { /* http拦截器已处理 */ }
     };
     // 行内添加标签
+    const inlineTagSelectRef = ref(null);
+    const clearInlineTagSearch = () => {
+      nextTick(() => {
+        const input = inlineTagSelectRef.value?.$el?.querySelector("input");
+        if (input) { input.value = ""; input.dispatchEvent(new Event("input")); }
+      });
+    };
     const inlineAddTagState = reactive({ fileId: null, tagIds: [] });
     const showInlineAddTag = (file) => {
       inlineAddTagState.fileId = file.id;
@@ -1726,11 +1739,14 @@ const HomeView = {
       filterByTag,
       removeFileTag,
       inlineAddTagState,
+      inlineTagSelectRef,
+      clearInlineTagSearch,
       showInlineAddTag,
       hideInlineAddTag,
       submitInlineAddTag,
       onFileQueryTagChange,
       tagTreeNoVirtual,
+      genTagPickRef,
       genTagPickIds,
       onGenTagPick,
       selectedFiles,
@@ -1949,6 +1965,7 @@ const HomeView = {
               <span class="gen-label">已选标签</span>
               <div style="flex:1;">
                 <el-tree-select
+                  ref="genTagPickRef"
                   v-model="genTagPickIds"
                   :data="tagTreeNoVirtual"
                   :props="{ value: 'id', label: 'name', children: 'children' }"
@@ -2153,6 +2170,7 @@ const HomeView = {
                     </template>
                     <div style="display:flex;flex-direction:column;gap:8px;" @keyup.enter="submitInlineAddTag(row)">
                       <el-select
+                        ref="inlineTagSelectRef"
                         v-model="inlineAddTagState.tagIds"
                         multiple
                         filterable
@@ -2161,6 +2179,7 @@ const HomeView = {
                         placeholder="选择或输入新标签"
                         size="small"
                         style="width:100%;"
+                        @change="clearInlineTagSearch"
                       >
                         <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
                       </el-select>
